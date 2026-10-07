@@ -27,6 +27,13 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # Read the app version so release assets carry it in their filename
+      # (VPeeN-4.1.2-Windows.zip) - prevents "which build am I running?"
+      - name: Read version
+        id: ver
+        shell: bash
+        run: echo "version=$(sed -n 's/^__version__ = \"\(.*\)\"$/\1/p' vpeen/__init__.py)" >> "$GITHUB_OUTPUT"
+
       # Linux: use the distro interpreter + distro Tk (Xft-enabled fonts)
       - name: Setup Python (Linux)
         if: runner.os == 'Linux'
@@ -76,25 +83,25 @@ jobs:
       - name: Pack (Windows)
         if: runner.os == 'Windows'
         shell: pwsh
-        run: Compress-Archive -Path dist/VPeeN.exe -DestinationPath dist/${{ matrix.asset }}.zip
+        run: Compress-Archive -Path dist/VPeeN.exe -DestinationPath dist/VPeeN-${{ steps.ver.outputs.version }}-Windows.zip
 
       - name: Pack (macOS)
         if: runner.os == 'macOS'
         run: |
           cd dist
-          zip -r -y ${{ matrix.asset }}.zip VPeeN.app
+          zip -r -y VPeeN-${{ steps.ver.outputs.version }}-macOS.zip VPeeN.app
 
       - name: Pack (Linux)
         if: runner.os == 'Linux'
         run: |
           chmod +x dist/VPeeN
-          tar -czf dist/${{ matrix.asset }}.tar.gz -C dist VPeeN
+          tar -czf dist/VPeeN-${{ steps.ver.outputs.version }}-Linux.tar.gz -C dist VPeeN
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
           name: ${{ matrix.asset }}
-          path: dist/${{ matrix.asset }}.*
+          path: dist/VPeeN-*
 
   release:
     name: Release

@@ -680,6 +680,14 @@ class TunnelController:
 
 # ------------------------------------------------------------ worker entry
 def _worker_main(ctl_port: int, ctl_token: str) -> int:
+    # The elevated worker runs the DNS relay (UDP datagram endpoints), which
+    # is fragile/unsupported on the default Windows ProactorEventLoop.
+    # The small SelectorEventLoop handles everything this worker needs.
+    if sys.platform == "win32":
+        try:
+            asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
+        except Exception:
+            pass
     worker = TunnelWorker(ctl_port, ctl_token)
     try:
         asyncio.run(worker.amain())

@@ -124,8 +124,8 @@ if sys.platform == "darwin":
         info_plist={
             "CFBundleName": "VPeeN",
             "CFBundleDisplayName": "VPeeN",
-            "CFBundleShortVersionString": "4.1.1",
-            "CFBundleVersion": "4.1.1",
+            "CFBundleShortVersionString": "4.1.2",
+            "CFBundleVersion": "4.1.2",
             "NSHighResolutionCapable": True,
             "LSMinimumSystemVersion": "10.13",
         },
