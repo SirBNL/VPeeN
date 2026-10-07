@@ -5,5 +5,5 @@ system-wide SOCKS5 / HTTP proxy, with a modern VPN-style GUI.
 Pure Python. Core = standard library only; GUI uses CustomTkinter.
 """
 
-__version__ = "4.1.0"
+__version__ = "4.1.1"
 __app_name__ = "VPeeN"

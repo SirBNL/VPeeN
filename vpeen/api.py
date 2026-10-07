@@ -25,6 +25,7 @@ import random
 import ssl
 import urllib.request
 import urllib.error
+import uuid
 
 from .utils import State, err, info, local_timezone_name, now_ms, ok, warn
 
@@ -110,7 +111,7 @@ class VeePNApi:
         """Stable per-installation device id (like the extension's UUID)."""
         udid = self.state.get("udid")
         if not udid:
-            udid = str(__import__("uuid").uuid4())
+            udid = str(uuid.uuid4())
             self.state.set("udid", udid)
         return udid
 

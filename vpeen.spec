@@ -18,8 +18,13 @@ for pkg in ("customtkinter",):
     binaries += b
     hidden += h
 # ImageTk registers the "PyImagingPhoto" Tk command via PIL._tkinter_finder;
-# without these hidden imports the frozen app crashes on the first flag icon
-hidden += ["PIL.ImageTk", "PIL._tkinter_finder"]
+# without these hidden imports the frozen app crashes on the first flag icon.
+# "uuid" is imported dynamically nowhere anymore, but keep it pinned as a
+# belt-and-suspenders guard for frozen builds (regression v4.1.0: the Windows
+# build shipped without it because __import__("uuid") is invisible to the
+# static analysis -> fresh installs failed the locations fetch with
+# "No module named 'uuid'").
+hidden += ["PIL.ImageTk", "PIL._tkinter_finder", "uuid"]
 
 # make sure the _tkinter C extension itself is always bundled (some venvs
 # keep it in a non-default location, e.g. a patched site-packages); when it
@@ -119,8 +124,8 @@ if sys.platform == "darwin":
         info_plist={
             "CFBundleName": "VPeeN",
             "CFBundleDisplayName": "VPeeN",
-            "CFBundleShortVersionString": "4.1.0",
-            "CFBundleVersion": "4.1.0",
+            "CFBundleShortVersionString": "4.1.1",
+            "CFBundleVersion": "4.1.1",
             "NSHighResolutionCapable": True,
             "LSMinimumSystemVersion": "10.13",
         },
