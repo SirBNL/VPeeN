@@ -13,7 +13,8 @@ import time
 
 from .api import VeePNApi
 from .cli import DEFAULT_STATE_PATH
-from .localproxy import LocalProxyServer, Stats, TunnelFactory
+from .localproxy import (LocalProxyServer, Stats, TunnelFactory,
+                         install_noise_filter)
 from .systemproxy import system_off, system_on
 from .upstream import check_exit_ip
 from .utils import State
@@ -82,6 +83,7 @@ class Core:
     def _thread_main(self, region, bind, socks_port, http_port, set_system) -> None:
         loop = asyncio.new_event_loop()
         asyncio.set_event_loop(loop)
+        install_noise_filter()   # silence WinError 10054 peer-reset noise
         try:
             loop.run_until_complete(
                 self._amain(region, bind, socks_port, http_port, set_system))
@@ -187,10 +189,23 @@ class Core:
                        upstream_ips=self.upstream_ips())
 
             # live stats feed until stop is requested
+            last_failed = 0
+            last_fail_log = 0.0
             while not self._stop_evt.is_set():
                 await asyncio.sleep(1.0)
                 self._emit(type="stats", conns=stats.connections, active=stats.active,
                            failed=stats.failed, up=stats.bytes_up, down=stats.bytes_down)
+                # surface WHY connections fail (throttled to 1 line / 10 s)
+                if stats.failed > last_failed:
+                    now = time.monotonic()
+                    if now - last_fail_log >= 10.0:
+                        n = stats.failed - last_failed
+                        last_failed = stats.failed
+                        last_fail_log = now
+                        self.log(f"{n} connection(s) failed"
+                                 f"{stats.reasons_summary()}", "warn")
+                elif stats.failed < last_failed:
+                    last_failed = stats.failed
         except OSError as e:
             self.log(f"Network/listen error: {e}", "err")
             self._emit(type="phase", phase=PHASE_ERROR, detail=str(e))

@@ -157,8 +157,11 @@ async def connect_via_server(server: dict, target_host: str, target_port: int,
                 except Exception:
                     pass
             continue
+    # str(TimeoutError()) is empty on Python 3.11+, so tag it explicitly
+    kind = ("handshake timeout" if isinstance(last_exc, asyncio.TimeoutError)
+            else last_exc)
     raise UpstreamError(
-        f"Cannot reach upstream proxy {addresses}:{port}: {last_exc}",
+        f"Cannot reach upstream proxy {addresses}:{port}: {kind}",
         SOCK_ERRORS["host_unreachable"],
     )
 

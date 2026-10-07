@@ -15,8 +15,13 @@ Stability design (v4.1):
 * Credentials are re-fetched whenever the upstream says 401/403
   (rate-limited to once per cooldown, not once per process lifetime).
 * Handshake timeouts everywhere so hung sockets never pile up.
+* Parallel upstream handshakes are capped (browsers open 30+ sockets
+  at once; hammering the free proxy with all of them triggers 429s).
+* Every failed connection is counted WITH a reason (http429, timeout,
+  tls, ...) so failure counts are never a mystery.
 """
 import asyncio
+import collections
 import time
 
 from .upstream import (SOCK_ERRORS, UpstreamError, connect_via_server,
@@ -30,16 +35,94 @@ CONNECT_TIMEOUT = 8           # per-server upstream connect budget
 COOLDOWN_BASE = 20            # first failure cooldown (seconds)
 COOLDOWN_MAX = 600            # max cooldown for a dead server
 REFRESH_MIN_INTERVAL = 90     # min seconds between credential re-fetches
+MAX_PARALLEL_UPSTREAM = 8     # cap concurrent upstream TLS+CONNECT handshakes
 
 
 class Stats:
+    RECENT_MAX = 30
+
     def __init__(self):
         self.connections = 0
         self.active = 0
         self.failed = 0
         self.bytes_up = 0
         self.bytes_down = 0
+        self.reasons = collections.Counter()      # reason -> count
+        self.recent = collections.deque(          # (reason, host:port)
+            maxlen=self.RECENT_MAX)
 
+    def note_fail(self, reason: str, target: str = ""):
+        """Record one failed connection with its cause (never raises)."""
+        try:
+            self.failed += 1
+            self.reasons[reason] += 1
+            self.recent.append((reason, target))
+        except Exception:
+            pass
+
+    def reasons_summary(self, top=3) -> str:
+        """Compact text for the stats line, e.g. ' (http429:20 timeout:4)'."""
+        try:
+            if not self.reasons:
+                return ""
+            parts = [f"{r}:{n}" for r, n in self.reasons.most_common(top)]
+            more = len(self.reasons) - top
+            if more > 0:
+                parts.append(f"+{more} more")
+            return "  (" + " ".join(parts) + ")"
+        except Exception:
+            return ""
+
+
+def fail_reason(e: Exception) -> str:
+    """Compact reason tag for a failed upstream open."""
+    try:
+        if isinstance(e, UpstreamError):
+            if e.status:
+                return f"http{e.status}"
+            text = str(e).lower()
+            if "timeout" in text or "timed out" in text:
+                return "timeout"
+            if "ssl" in text or "certificate" in text:
+                return "tls"
+            if "getaddrinfo" in text or "nodename" in text or \
+                    "name or service" in text or "no such host" in text:
+                return "dns"
+            if "malformed" in text:
+                return "bad-server"
+            if "no upstream servers" in text:
+                return "no-server"
+            return "upstream"
+        if isinstance(e, asyncio.TimeoutError):
+            return "timeout"
+        if isinstance(e, (ConnectionError, OSError)):
+            return "net"
+        return type(e).__name__
+    except Exception:
+        return "unknown"
+
+
+
+def install_noise_filter():
+    """Windows asyncio: browsers hard-reset sockets constantly, which makes
+    the transport's _call_connection_lost callback raise
+    ConnectionResetError (WinError 10054). That is pure noise - the tunnel
+    code already handles resets - so silence exactly that case (callback
+    contexts only) and surface everything else to the default handler."""
+    try:
+        loop = asyncio.get_running_loop()
+
+        def _handler(l, context):
+            exc = context.get("exception")
+            if "handle" in context and isinstance(
+                    exc, (ConnectionResetError, ConnectionAbortedError,
+                          BrokenPipeError)):
+                return  # peer went away mid-teardown - harmless
+            l.default_exception_handler(context)
+
+        loop.set_exception_handler(_handler)
+    except Exception:
+        pass
 
 async def _pipe(reader, writer, stats: Stats, direction: str) -> str:
     """Copy reader -> writer until EOF or error.
@@ -149,6 +232,11 @@ class TunnelFactory:
         self._cooldown = {}          # server index -> monotonic deadline
         self._fail_streak = {}       # server index -> consecutive failures
         self._last_refresh = 0.0
+        # Browsers fire 20-40 sockets at once; serialising upstream
+        # handshakes (max 8 in flight) avoids tripping the free proxy's
+        # per-credential rate limit, which used to cascade into
+        # dozens of failed connections during browsing bursts.
+        self._sem = asyncio.Semaphore(MAX_PARALLEL_UPSTREAM)
 
     def upstream_ips(self):
         """All known upstream proxy addresses (for anti-loop host routes)."""
@@ -219,11 +307,12 @@ class TunnelFactory:
                 break
             server = self.servers[idx]
             try:
-                rw = await connect_via_server(
-                    server, target_host, target_port,
-                    insecure_tls=self.insecure_tls,
-                    connect_timeout=CONNECT_TIMEOUT,
-                )
+                async with self._sem:
+                    rw = await connect_via_server(
+                        server, target_host, target_port,
+                        insecure_tls=self.insecure_tls,
+                        connect_timeout=CONNECT_TIMEOUT,
+                    )
                 self._mark_ok(idx)
                 return rw
             except UpstreamError as e:
@@ -250,10 +339,12 @@ class LocalProxyServer:
     async def _readexactly(self, reader, n):
         return await asyncio.wait_for(reader.readexactly(n), HANDSHAKE_TIMEOUT)
 
-    def _reply_fail(self, client_writer, code):
+    async def _reply_fail(self, client_writer, code):
+        """Send a SOCKS5 failure reply and close. v4.1.3: drain is awaited
+        (an unawaited drain coroutine leaked a RuntimeWarning per failure)."""
         try:
             client_writer.write(b"\x05" + bytes([code]) + b"\x00\x01" + b"\x00" * 6)
-            client_writer.drain()
+            await client_writer.drain()
             client_writer.close()
         except Exception:
             pass
@@ -284,13 +375,13 @@ class LocalProxyServer:
             elif atyp == 0x03:    # domain (already ASCII/punycode on wire)
                 ln = (await self._readexactly(client_reader, 1))[0]
                 if ln == 0:
-                    self._reply_fail(client_writer, SOCK_ERRORS["general"])
+                    await self._reply_fail(client_writer, SOCK_ERRORS["general"])
                     return
                 try:
                     host = (await self._readexactly(client_reader, ln)) \
                         .decode("ascii").strip().rstrip(".")
                 except UnicodeDecodeError:
-                    self._reply_fail(client_writer, SOCK_ERRORS["general"])
+                    await self._reply_fail(client_writer, SOCK_ERRORS["general"])
                     return
             elif atyp == 0x04:    # IPv6
                 raw = await self._readexactly(client_reader, 16)
@@ -304,19 +395,19 @@ class LocalProxyServer:
             port_hi, port_lo = await self._readexactly(client_reader, 2)
             port = (port_hi << 8) | port_lo
             if not host or not (0 < port < 65536):
-                self._reply_fail(client_writer, SOCK_ERRORS["general"])
+                await self._reply_fail(client_writer, SOCK_ERRORS["general"])
                 return
 
             try:
                 upstream_reader, upstream_writer = await self.factory.open(host, port)
             except UpstreamError as e:
-                self.stats.failed += 1
+                self.stats.note_fail(fail_reason(e), f"{host}:{port}")
                 code = e.socks_code if e.socks_code != 0 else SOCK_ERRORS["general"]
-                self._reply_fail(client_writer, code)
+                await self._reply_fail(client_writer, code)
                 return
-            except Exception:
-                self.stats.failed += 1
-                self._reply_fail(client_writer, SOCK_ERRORS["general"])
+            except Exception as e:
+                self.stats.note_fail(fail_reason(e), f"{host}:{port}")
+                await self._reply_fail(client_writer, SOCK_ERRORS["general"])
                 return
 
             enable_keepalive(client_writer)
@@ -378,8 +469,8 @@ class LocalProxyServer:
                     return
                 try:
                     upstream_reader, upstream_writer = await self.factory.open(host, port)
-                except Exception:
-                    self.stats.failed += 1
+                except Exception as e:
+                    self.stats.note_fail(fail_reason(e), f"{host}:{port}")
                     client_writer.write(
                         b"HTTP/1.1 502 Bad Gateway\r\n"
                         b"Proxy-Status: vpeen-upstream-failed\r\n\r\n"
@@ -409,8 +500,8 @@ class LocalProxyServer:
             path = (sp.path or "/") + (("?" + sp.query) if sp.query else "")
             try:
                 upstream_reader, upstream_writer = await self.factory.open(host, port)
-            except Exception:
-                self.stats.failed += 1
+            except Exception as e:
+                self.stats.note_fail(fail_reason(e), f"{host}:{port}")
                 client_writer.write(b"HTTP/1.1 502 Bad Gateway\r\n\r\n")
                 await client_writer.drain()
                 client_writer.close()
