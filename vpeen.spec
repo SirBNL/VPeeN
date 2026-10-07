@@ -1,6 +1,12 @@
 # -*- mode: python ; coding: utf-8 -*-
-"""PyInstaller spec for VPeeN - builds a windowed one-file executable."""
+"""PyInstaller spec for VPeeN - builds a windowed one-file executable.
+
+Bundles the tunnel helper binaries (tun2socks + wintun.dll) that match the
+BUILD machine's platform; CI runs one job per OS, so each release gets the
+right set.  Run scripts/fetch-binaries.py first.
+"""
 import os
+import platform
 import sys
 
 from PyInstaller.utils.hooks import collect_all
@@ -14,6 +20,49 @@ for pkg in ("customtkinter",):
 for asset in ("icon.png", "icon.ico", "logo.png"):
     if os.path.exists(os.path.join("assets", asset)):
         datas.append((os.path.join("assets", asset), "assets"))
+
+# ---- circular country flags shown in the location panel
+flag_dir = os.path.join("assets", "flags")
+if os.path.isdir(flag_dir):
+    for fn in sorted(os.listdir(flag_dir)):
+        if fn.endswith(".png"):
+            datas.append((os.path.join(flag_dir, fn), "assets/flags"))
+
+# ---- tunnel helper binaries for this platform
+machine = platform.machine().lower()
+system = platform.system().lower()
+if system.startswith("windows"):
+    key = "windows-amd64" if "64" in machine else "windows-x86"
+elif system == "darwin":
+    key = "darwin-arm64" if machine in ("arm64", "aarch64") else "darwin-amd64"
+else:
+    key = "linux-amd64" if "64" in machine else "linux-x86"
+
+tun_name = "tun2socks.exe" if key.startswith("windows") else "tun2socks"
+tun_path = os.path.join("assets", "bin", key, tun_name)
+if key.startswith("windows"):
+    if os.path.exists(tun_path):
+        datas.append((tun_path, "assets/bin/" + key))
+    else:
+        print(f"!! WARNING: {tun_path} missing - tunnel mode unavailable")
+    arch = "amd64" if "64" in machine else ("arm64" if "arm" in machine else "x86")
+    wt = os.path.join("assets", "bin", "wintun", arch, "wintun.dll")
+    if os.path.exists(wt):
+        datas.append((wt, "assets/bin/" + key))   # must sit next to tun2socks.exe
+    lic = os.path.join("assets", "bin", "wintun", "LICENSE.txt")
+    if os.path.exists(lic):
+        datas.append((lic, "assets/bin"))
+elif os.path.exists(tun_path):
+    # POSIX: keep the executable bit by registering it as a PyInstaller binary
+    binaries.append((tun_path, "assets/bin/" + key))
+    if system == "darwin":
+        # ship BOTH architectures; binary_paths() picks at runtime
+        other = "darwin-amd64" if key == "darwin-arm64" else "darwin-arm64"
+        other_path = os.path.join("assets", "bin", other, tun_name)
+        if os.path.exists(other_path):
+            binaries.append((other_path, "assets/bin/" + other))
+else:
+    print(f"!! WARNING: {tun_path} missing - tunnel mode unavailable")
 
 icon = "assets/icon.ico" if os.path.exists("assets/icon.ico") else None
 
@@ -58,8 +107,8 @@ if sys.platform == "darwin":
         info_plist={
             "CFBundleName": "VPeeN",
             "CFBundleDisplayName": "VPeeN",
-            "CFBundleShortVersionString": "2.0.0",
-            "CFBundleVersion": "2.0.0",
+            "CFBundleShortVersionString": "4.0.0",
+            "CFBundleVersion": "4.0.0",
             "NSHighResolutionCapable": True,
             "LSMinimumSystemVersion": "10.13",
         },

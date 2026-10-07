@@ -34,8 +34,16 @@ class Core:
         self.phase = PHASE_DISCONNECTED
         self.stats: Stats | None = None
         self.region = None
+        self.factory: TunnelFactory | None = None
         self._thread: threading.Thread | None = None
         self._stop_evt: threading.Event | None = None
+
+    def upstream_ips(self) -> list[str]:
+        """Current upstream proxy IPs (for tunnel anti-loop host routes)."""
+        try:
+            return self.factory.upstream_ips() if self.factory else []
+        except Exception:
+            return []
 
     # ------------------------------------------------------------ public API
     def is_busy(self) -> bool:
@@ -65,6 +73,11 @@ class Core:
 
     def log(self, msg: str, level: str = "info") -> None:
         self._emit(type="log", ts=time.strftime("%H:%M:%S"), level=level, line=msg)
+
+    def _on_servers_rotated(self, new_servers):
+        """Upstream credentials were refreshed - notify the tunnel layer."""
+        self.log("Upstream server list was refreshed (credentials rotated).")
+        self._emit(type="servers_rotated", upstream_ips=self.upstream_ips())
 
     def _thread_main(self, region, bind, socks_port, http_port, set_system) -> None:
         loop = asyncio.new_event_loop()
@@ -106,7 +119,9 @@ class Core:
 
             stats = Stats()
             self.stats = stats
-            factory = TunnelFactory(api, servers, insecure_tls=self.insecure)
+            factory = TunnelFactory(api, servers, insecure_tls=self.insecure,
+                                    on_refresh=self._on_servers_rotated)
+            self.factory = factory
             proxy = LocalProxyServer(factory, stats)
 
             async def socks_cb(r, w):
@@ -159,6 +174,8 @@ class Core:
                     self.log(f"Could not set system proxy: {e}", "err")
 
             self._emit(type="phase", phase=PHASE_CONNECTED, region=region, exit_ip=exit_ip)
+            self._emit(type="listeners", socks_port=socks_port, http_port=http_port,
+                       upstream_ips=self.upstream_ips())
 
             # live stats feed until stop is requested
             while not self._stop_evt.is_set():
@@ -172,6 +189,7 @@ class Core:
             self.log(f"Core error: {e}", "err")
             self._emit(type="phase", phase=PHASE_ERROR, detail=str(e))
         finally:
+            self.factory = None
             for srv in (socks_srv, http_srv):
                 try:
                     if srv is not None:
@@ -200,8 +218,8 @@ def spawn_quick_task(events_q, kind: str, state_path: str = DEFAULT_STATE_PATH,
             async def _go():
                 api = VeePNApi(State(state_path), insecure_tls=insecure)
                 if kind == "locations":
-                    _, free = await api.locations()
-                    return free
+                    all_loc, _free = await api.locations()
+                    return all_loc
                 if kind == "direct_ip":
                     return await api.check_ip_direct()
                 raise ValueError(kind)

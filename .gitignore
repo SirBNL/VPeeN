@@ -19,3 +19,6 @@ state.json
 .vscode/
 .DS_Store
 Thumbs.db
+
+# tunnel helper binaries are fetched at build time (scripts/fetch-binaries.py)
+assets/bin/

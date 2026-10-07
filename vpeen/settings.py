@@ -14,6 +14,11 @@ DEFAULTS = {
     "last_region": "",
     "auto_connect": False,
     "save_logs": True,
+    # --- tunnel (VPN) mode
+    "tunnel_enabled": False,       # use TUN mode on connect
+    "tunnel_dns": True,            # relay DNS through the tunnel (no leaks)
+    "tunnel_mtu": 1500,            # conservative; raise to 8500 if stable
+    "tunnel_sweep": True,          # clean orphaned state from a crashed session
 }
 
 

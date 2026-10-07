@@ -49,6 +49,22 @@ jobs:
           python -m pip install --upgrade pip wheel
           pip install customtkinter==5.2.2 pillow pyinstaller
 
+      - name: Fetch tunnel binaries (macOS - both archs)
+        if: runner.os == 'macOS'
+        run: python scripts/fetch-binaries.py --only darwin-amd64 darwin-arm64 --skip-wintun
+
+      - name: Fetch tunnel binaries (Windows / Linux)
+        if: runner.os != 'macOS'
+        run: python scripts/fetch-binaries.py
+        env:
+          VPeeN_PLATFORM: ${{ runner.os == 'Windows' && 'windows-amd64' || 'linux-amd64' }}
+
+      - name: Ad-hoc sign tun2socks (macOS)
+        if: runner.os == 'macOS'
+        run: |
+          codesign --force --sign - assets/bin/darwin-amd64/tun2socks
+          codesign --force --sign - assets/bin/darwin-arm64/tun2socks
+
       - name: Build (Linux)
         if: runner.os == 'Linux'
         run: .venv/bin/pyinstaller vpeen.spec --noconfirm

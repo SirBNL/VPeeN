@@ -77,12 +77,22 @@ async def _tunnel(client_reader, client_writer, upstream_reader, upstream_writer
 class TunnelFactory:
     """Builds upstream tunnels with server rotation + one auto-refresh."""
 
-    def __init__(self, api, servers, insecure_tls=False):
+    def __init__(self, api, servers, insecure_tls=False, on_refresh=None):
         self.api = api
         self.servers = list(servers)
         self.insecure_tls = insecure_tls
+        self.on_refresh = on_refresh      # callback(new_servers) for tunnel mode
         self.refreshed = False
         self.rr = 0  # round-robin cursor
+
+    def upstream_ips(self):
+        """All known upstream proxy addresses (for anti-loop host routes)."""
+        ips = []
+        for s in self.servers:
+            for a in s.get("addresses") or []:
+                if a and a not in ips:
+                    ips.append(a)
+        return ips
 
     async def open(self, target_host, target_port):
         if not self.servers:
@@ -104,6 +114,11 @@ class TunnelFactory:
                     try:
                         region = self.servers[0].get("region")
                         self.servers = await self.api.refresh_servers_if_expired(region)
+                        if self.on_refresh:
+                            try:
+                                self.on_refresh(self.servers)
+                            except Exception:
+                                pass
                     except Exception:
                         pass
         raise UpstreamError("; ".join(errors[-2:]))
