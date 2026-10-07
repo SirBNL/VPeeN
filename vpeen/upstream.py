@@ -3,9 +3,18 @@ Upstream connector: tunnels a client connection through the VeePN
 HTTPS (CONNECT-over-TLS) proxy with basic auth.
 
     client -> [TLS] -> VeePN proxy (CONNECT host:port) -> target
+
+v1.2 hardening:
+* the whole handshake (TCP+TLS+CONNECT+status line) is bounded by
+  connect_timeout, and the status line read itself has a deadline, so a
+  half-dead server can never stall a client connection for minutes.
+* UpstreamError carries the HTTP status (401/403/429/...) so the tunnel
+  factory can decide between "refresh credentials" and "just rotate".
+* TCP keepalive on the upstream socket to spot dead peers sooner.
 """
 import asyncio
 import base64
+import socket
 import ssl
 
 CHUNK = 65536
@@ -24,26 +33,57 @@ SOCK_ERRORS = {
 
 
 class UpstreamError(Exception):
-    def __init__(self, message, socks_code=SOCK_ERRORS["general"]):
+    def __init__(self, message, socks_code=SOCK_ERRORS["general"], status=None):
         self.socks_code = socks_code
+        self.status = status          # HTTP status code of the CONNECT reply
         super().__init__(message)
 
 
-def _classify_connect_failure(status_line: str) -> int:
+def _classify_connect_failure(status_line: str):
+    """Return (socks_code, http_status or None) for a failed CONNECT."""
     s = status_line.lower()
-    if "403" in s or "401" in s:
-        return SOCK_ERRORS["not_allowed"]          # bad/expired credentials
-    if "404" in s or "410" in s:
-        return SOCK_ERRORS["host_unreachable"]
-    if "429" in s:
-        return SOCK_ERRORS["not_allowed"]
-    if "refused" in s or "500" in s or "502" in s or "503" in s:
-        return SOCK_ERRORS["refused"]
-    return SOCK_ERRORS["general"]
+    try:
+        code = int(status_line.split()[1]) if len(status_line.split()) > 1 else None
+    except (ValueError, IndexError):
+        code = None
+    if " 403" in s or " 401" in s:
+        return SOCK_ERRORS["not_allowed"], code       # bad/expired credentials
+    if " 404" in s or " 410" in s:
+        return SOCK_ERRORS["host_unreachable"], code
+    if " 429" in s:
+        return SOCK_ERRORS["not_allowed"], code       # rate limited -> rotate
+    if "refused" in s or " 500" in s or " 502" in s or " 503" in s or " 504" in s:
+        return SOCK_ERRORS["refused"], code
+    return SOCK_ERRORS["general"], code
+
+
+def enable_keepalive(writer, idle_hint=45):
+    """Best-effort TCP keepalive so dead sockets are noticed instead of
+    silently half-open piling up (especially useful through NAT)."""
+    if writer is None:
+        return
+    try:
+        sock = writer.get_extra_info("socket")
+        if sock is None:
+            return
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1)
+        # fine-tune where the platform supports it (Linux); harmless elsewhere
+        TCP_KEEPIDLE = getattr(socket, "TCP_KEEPIDLE", None)
+        TCP_KEEPINTVL = getattr(socket, "TCP_KEEPINTVL", None)
+        TCP_KEEPCNT = getattr(socket, "TCP_KEEPCNT", None)
+        if TCP_KEEPIDLE is not None:
+            sock.setsockopt(socket.IPPROTO_TCP, TCP_KEEPIDLE, idle_hint)
+        if TCP_KEEPINTVL is not None:
+            sock.setsockopt(socket.IPPROTO_TCP, TCP_KEEPINTVL, 10)
+        if TCP_KEEPCNT is not None:
+            sock.setsockopt(socket.IPPROTO_TCP, TCP_KEEPCNT, 3)
+    except Exception:
+        pass
 
 
 async def connect_via_server(server: dict, target_host: str, target_port: int,
-                             insecure_tls: bool = False, connect_timeout: float = 15.0):
+                             insecure_tls: bool = False,
+                             connect_timeout: float = 10.0):
     """
     Open a TLS connection to the VeePN proxy server, issue CONNECT and return
     (reader, writer) of the tunnel once the proxy answers 200.
@@ -60,13 +100,15 @@ async def connect_via_server(server: dict, target_host: str, target_port: int,
 
     last_exc = None
     for host in addresses:
+        writer = None
         try:
             ssl_ctx = ssl.create_default_context()
             if insecure_tls:
                 ssl_ctx.check_hostname = False
                 ssl_ctx.verify_mode = ssl.CERT_NONE
             reader, writer = await asyncio.wait_for(
-                asyncio.open_connection(host, port, ssl=ssl_ctx, server_hostname=host),
+                asyncio.open_connection(host, port, ssl=ssl_ctx,
+                                        server_hostname=host),
                 timeout=connect_timeout,
             )
             auth = base64.b64encode(f"{username}:{password}".encode()).decode()
@@ -78,28 +120,42 @@ async def connect_via_server(server: dict, target_host: str, target_port: int,
                 f"Proxy-Connection: keep-alive\r\n\r\n"
             )
             writer.write(req.encode("latin-1"))
-            await writer.drain()
+            await asyncio.wait_for(writer.drain(), timeout=connect_timeout)
 
-            status_line = (await reader.readline()).decode("latin-1", errors="replace")
+            # status line with its own deadline - a silent proxy must not
+            # hold the client connection hostage
+            status_line = (await asyncio.wait_for(
+                reader.readline(), timeout=connect_timeout)
+            ).decode("latin-1", errors="replace")
             # consume response headers
             while True:
-                line = await reader.readline()
+                line = await asyncio.wait_for(reader.readline(),
+                                              timeout=connect_timeout)
                 if line in (b"\r\n", b"\n", b""):
                     break
             if " 200" in status_line:
+                enable_keepalive(writer)
                 return reader, writer
             try:
                 writer.close()
             except Exception:
                 pass
+            code, status = _classify_connect_failure(status_line)
             raise UpstreamError(
                 f"Upstream CONNECT failed: {status_line.strip()}",
-                _classify_connect_failure(status_line),
+                code, status,
             )
         except UpstreamError:
             raise
+        except asyncio.CancelledError:
+            raise
         except Exception as e:  # TLS / DNS / timeout -> try next address
             last_exc = e
+            if writer is not None:
+                try:
+                    writer.close()
+                except Exception:
+                    pass
             continue
     raise UpstreamError(
         f"Cannot reach upstream proxy {addresses}:{port}: {last_exc}",

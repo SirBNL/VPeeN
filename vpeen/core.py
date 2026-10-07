@@ -97,6 +97,7 @@ class Core:
     async def _amain(self, region, bind, socks_port, http_port, set_system) -> None:
         api = None
         socks_srv = http_srv = None
+        client_tasks = set()
         set_system_done = False
         try:
             self.log(f"VPeeN core starting - target region: {region or 'optimal'}")
@@ -124,23 +125,31 @@ class Core:
             self.factory = factory
             proxy = LocalProxyServer(factory, stats)
 
-            async def socks_cb(r, w):
-                try:
-                    await proxy.handle_socks5(r, w)
-                except (asyncio.IncompleteReadError, ConnectionError, OSError):
-                    try:
-                        w.close()
-                    except Exception:
-                        pass
+            # --- explicit client-task registry: every handler task is tracked
+            # so we can cancel and REAP it on stop.  Prevents "Task was
+            # destroyed but it is pending!" spam and unretrieved exceptions
+            # when the user disconnects with live connections.
+            # (client_tasks initialised at the top of _amain)
 
-            async def http_cb(r, w):
-                try:
-                    await proxy.handle_http(r, w)
-                except (ConnectionError, OSError):
-                    try:
-                        w.close()
-                    except Exception:
-                        pass
+            def _spawn(coro):
+                t = asyncio.ensure_future(coro)
+                client_tasks.add(t)
+
+                def _done(task, _set=client_tasks):
+                    _set.discard(task)
+                    if not task.cancelled():
+                        exc = task.exception()  # retrieve so asyncio stays quiet
+                        if exc is not None:
+                            self.log(f"Connection handler error: "
+                                     f"{type(exc).__name__}: {exc}", "warn")
+                t.add_done_callback(_done)
+                return t
+
+            def socks_cb(r, w):
+                _spawn(proxy.handle_socks5(r, w))
+
+            def http_cb(r, w):
+                _spawn(proxy.handle_http(r, w))
 
             socks_srv = await asyncio.start_server(socks_cb, bind, socks_port)
             http_srv = await asyncio.start_server(http_cb, bind, http_port)
@@ -190,12 +199,26 @@ class Core:
             self._emit(type="phase", phase=PHASE_ERROR, detail=str(e))
         finally:
             self.factory = None
+            # ---- graceful, warning-free shutdown ----
+            # NOTE: on Python 3.12.1+ Server.wait_closed() waits for ALL
+            # client handlers, so handlers must be cancelled+reaped BEFORE
+            # awaiting wait_closed, otherwise disconnect deadlocks.
             for srv in (socks_srv, http_srv):
                 try:
                     if srv is not None:
                         srv.close()
                 except Exception:
                     pass
+            try:
+                for t in list(client_tasks):
+                    t.cancel()
+                if client_tasks:
+                    await asyncio.gather(*client_tasks, return_exceptions=True)
+                for srv in (socks_srv, http_srv):
+                    if srv is not None:
+                        await asyncio.wait_for(srv.wait_closed(), timeout=10)
+            except Exception:
+                pass
             if set_system_done and api is not None:
                 try:
                     system_off(api.state)
