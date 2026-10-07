@@ -17,6 +17,18 @@ for pkg in ("customtkinter",):
     datas += d
     binaries += b
     hidden += h
+# ImageTk registers the "PyImagingPhoto" Tk command via PIL._tkinter_finder;
+# without these hidden imports the frozen app crashes on the first flag icon
+hidden += ["PIL.ImageTk", "PIL._tkinter_finder"]
+
+# make sure the _tkinter C extension itself is always bundled (some venvs
+# keep it in a non-default location, e.g. a patched site-packages); when it
+# lives in the normal stdlib lib-dynload PyInstaller already handles it
+import importlib.util
+_tk_spec = importlib.util.find_spec("_tkinter")
+if _tk_spec and _tk_spec.origin and "site-packages" in _tk_spec.origin:
+    binaries.append((_tk_spec.origin, "."))
+    hidden.append("_tkinter")
 for asset in ("icon.png", "icon.ico", "logo.png"):
     if os.path.exists(os.path.join("assets", asset)):
         datas.append((os.path.join("assets", asset), "assets"))
