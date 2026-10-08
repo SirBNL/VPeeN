@@ -104,10 +104,35 @@ class DNSRelay:
             self._cache.popitem(last=False)
 
     # -------------------------------------------------------------- upstream
+    @staticmethod
+    def _question_key(query: bytes) -> bytes:
+        """Cache key = the QUESTION section (name+type+class), not the raw
+        packet.  Keying on raw bytes meant the cache almost never hit - stub
+        resolvers randomise the transaction ID on every query, so two
+        lookups of the same name produced different keys.  The reply's ID is
+        rewritten to the current query's ID on cache hits (see resolve())."""
+        try:
+            if len(query) < 12:
+                return query
+            (qdcount,) = struct.unpack("!H", query[4:6])
+            pos = 12
+            for _ in range(qdcount):
+                while True:
+                    ln = query[pos]
+                    pos += 1
+                    if ln == 0:
+                        break
+                    pos += ln
+                pos += 4                      # qtype + qclass
+            return query[12:pos]
+        except Exception:
+            return query
+
     async def _relay_tcp_dns(self, query: bytes) -> bytes:
         """Send one DNS query over TCP through the tunnel, return response."""
         last_err = None
         for host, port in self.resolvers:
+            writer = None
             try:
                 reader, writer = await asyncio.wait_for(
                     self.socks_dial(host, port), timeout=QUERY_TIMEOUT)
@@ -118,26 +143,34 @@ class DNSRelay:
                 if ln == 0 or ln > 65535:
                     raise ValueError("bad TCP-DNS length")
                 body = await asyncio.wait_for(reader.readexactly(ln), 8)
-                try:
-                    writer.close()
-                except Exception:
-                    pass
                 return body
             except Exception as e:
                 last_err = e
+            finally:
+                # v4.2.1: the socket used to LEAK when the reply read failed
+                # (each failed query left an open tunnel + localproxy handler
+                # behind - a DNS outage multiplied into a socket famine).
+                if writer is not None:
+                    try:
+                        writer.close()
+                    except Exception:
+                        pass
         raise OSError(f"all resolvers failed ({last_err})")
 
     async def resolve(self, query: bytes) -> bytes:
         """Full query -> response (used by UDP and TCP paths)."""
         self._queries += 1
-        cached = self._cache_get(query)
+        key = self._question_key(query)
+        cached = self._cache_get(key)
         if cached is not None:
-            return cached
+            # rewrite the transaction ID so the stub accepts the reply
+            return query[:2] + cached[2:]
         resp = await self._relay_tcp_dns(query)
-        # big responses can't travel back over UDP safely -> ask stub to retry TCP
+        self._cache_put(key, resp)
+        # big responses can't travel back over UDP safely -> ask stub to retry
+        # TCP (cache the FULL response first - TCP clients must get it whole)
         if len(resp) > UDP_REPLY_SAFE:
             resp = _set_tc(resp[:512])
-        self._cache_put(query, resp)
         return resp
 
     # ------------------------------------------------------------------ tcp

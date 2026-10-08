@@ -30,6 +30,7 @@ from .upstream import (SOCK_ERRORS, UpstreamError, connect_via_server,
 CHUNK = 65536
 HANDSHAKE_TIMEOUT = 30        # per-phase client handshake budget
 BODY_TIMEOUT = 600            # budget for streaming a request body upstream
+MAX_REQUEST_BODY = 128 * 1024 * 1024   # plain-HTTP re-encode safety cap
 MAX_UPSTREAM_ATTEMPTS = 3     # servers tried per connection (bounded latency)
 CONNECT_TIMEOUT = 8           # per-server upstream connect budget
 COOLDOWN_BASE = 20            # first failure cooldown (seconds)
@@ -339,6 +340,28 @@ class LocalProxyServer:
     async def _readexactly(self, reader, n):
         return await asyncio.wait_for(reader.readexactly(n), HANDSHAKE_TIMEOUT)
 
+    async def _read_chunked(self, reader) -> bytes:
+        """Decode a chunked request body (v4.2.1: chunked POSTs arriving at
+        the plain-HTTP path used to be forwarded header-only, silently
+        corrupting the request - the body was never read or re-sent)."""
+        body = bytearray()
+        while True:
+            size_line = await asyncio.wait_for(reader.readline(), BODY_TIMEOUT)
+            try:
+                size = int(size_line.split(b";")[0].strip() or b"0", 16)
+            except ValueError:
+                raise ValueError("bad chunk size")
+            if size == 0:
+                while True:                       # consume trailers
+                    t = await asyncio.wait_for(reader.readline(), BODY_TIMEOUT)
+                    if t in (b"\r\n", b"\n", b""):
+                        break
+                return bytes(body)
+            if len(body) + size > MAX_REQUEST_BODY:
+                raise ValueError("request body too large")
+            body += await asyncio.wait_for(reader.readexactly(size), BODY_TIMEOUT)
+            await asyncio.wait_for(reader.readexactly(2), BODY_TIMEOUT)  # CRLF
+
     async def _reply_fail(self, client_writer, code):
         """Send a SOCKS5 failure reply and close. v4.1.3: drain is awaited
         (an unawaited drain coroutine leaked a RuntimeWarning per failure)."""
@@ -513,6 +536,7 @@ class LocalProxyServer:
                    "keep-alive", "connection", "te", "trailers", "upgrade"}
             out = [f"{method} {path} {httpver}"]
             content_length = None
+            chunked = False
             for line in lines[1:]:
                 if not line:
                     continue
@@ -525,13 +549,28 @@ class LocalProxyServer:
                         content_length = int(value.strip())
                     except ValueError:
                         pass
+                if lname == "transfer-encoding" and "chunked" in value.lower():
+                    chunked = True
+                    continue      # re-encoded with Content-Length below
                 out.append(line)
-            out.append("Connection: close")
-            out.append("")
-            upstream_writer.write(("\r\n".join(out) + "\r\n\r\n").encode("latin-1"))
-            if content_length:
+            # v4.2.1: read the body BEFORE sending headers upstream so the
+            # request can always be re-encoded with an exact Content-Length
+            # (a header-only request with a detached body used to hang or
+            # corrupt POSTs on the plain-HTTP path).
+            if chunked:
+                body = await self._read_chunked(client_reader)
+            elif content_length and content_length > 0:
                 body = await asyncio.wait_for(
                     client_reader.readexactly(content_length), BODY_TIMEOUT)
+            else:
+                body = b""
+            out.append("Connection: close")
+            out.append(f"Content-Length: {len(body)}")
+            # v1.2.4 fix: the old trailing out.append("") made join() emit a
+            # THIRD CRLF (double blank line) - tolerated by body-less GETs
+            # but it shifted every request body by two bytes.
+            upstream_writer.write(("\r\n".join(out) + "\r\n\r\n").encode("latin-1"))
+            if body:
                 upstream_writer.write(body)
             await upstream_writer.drain()
             self.stats.connections += 1

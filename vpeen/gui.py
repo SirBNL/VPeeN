@@ -769,6 +769,14 @@ class VPeeNApp(ctk.CTk):
         return "break"
 
     def _pick_location(self, row):
+        # v4.2.1: premium locations were clickable and silently connected to
+        # a region the free API cannot serve (HTTP 422 -> 'Something went
+        # wrong').  Refuse them with a clear message instead.
+        if not row["free"] and row["region"] is not None:
+            self._log_line(f"'{row['country']}' is a Premium location - "
+                           f"only the flags with the speed-bars icon are "
+                           f"free.", "warn")
+            return
         self.loc_selected = row["region"]
         self.cfg["last_region"] = row["region"] or ""
         cfgmod.save(self.cfg)
@@ -891,7 +899,12 @@ class VPeeNApp(ctk.CTk):
                        f"({'tunnel' if want_tunnel else 'proxy'} mode)...",
                        "info")
         self.pending_tunnel = want_tunnel
-        self.core.start(region, "127.0.0.1", socks_port, http_port, False)
+        # v4.2.1: the 'auto system proxy' setting used to be dead - start()
+        # was hardcoded to False, so proxy mode never configured the OS and
+        # users had to set it by hand every time.
+        set_system = bool(self.cfg.get("auto_system_proxy", False)) \
+            and not want_tunnel      # tunnel mode routes everything itself
+        self.core.start(region, "127.0.0.1", socks_port, http_port, set_system)
         self._set_phase("connecting")
 
     def _reconnect(self):
@@ -1309,6 +1322,11 @@ class VPeeNApp(ctk.CTk):
                 self._log_line(f"Your real IP: {self.direct_ip}", "ok")
         elif kind == "locations":
             self._fill_locations(ev)
+        elif kind == "pings":
+            if isinstance(ev.get("data"), dict) and ev["data"]:
+                self._pings.update(ev["data"])
+                if self.loc_sort == "fastest":
+                    self._render_loc_list()
         elif kind == "servers_rotated":
             self.tunnel.update_servers(ev.get("upstream_ips", []))
 
@@ -1363,6 +1381,13 @@ class VPeeNApp(ctk.CTk):
         self._log_line(f"{len(data)} locations loaded "
                        f"({sum(1 for r in rows if r['free']) - 1} free).",
                        "ok")
+        # v4.2.1: probe real latencies for the free regions so 'Fastest'
+        # sorts by measured connect time (and region server lists get cached)
+        free_regions = sorted({r["region"] for r in rows
+                               if r["free"] and r["region"]})
+        if free_regions:
+            spawn_quick_task(self.core.events, "pings",
+                             payload={"regions": free_regions[:10]})
 
     # ----------------------------------------------------------------- close
     def _on_close(self):
@@ -1371,7 +1396,19 @@ class VPeeNApp(ctk.CTk):
                 self.tunnel.shutdown_worker()
             if self.core.is_busy():
                 self.core.stop()
-                self.after(400, self.destroy)
+                # v4.2.1: destroying after a fixed 400ms could kill the core
+                # thread mid-restore (leaving the OS proxy or routes half
+                # applied).  Wait - bounded - for a clean stop.
+                self.after(150, self._wait_core_gone, 0)
+                return
+        except Exception:
+            pass
+        self.destroy()
+
+    def _wait_core_gone(self, waited_ms: int):
+        try:
+            if self.core.is_busy() and waited_ms < 3000:
+                self.after(150, self._wait_core_gone, waited_ms + 150)
                 return
         except Exception:
             pass

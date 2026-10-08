@@ -2,6 +2,7 @@
 import json
 import os
 import sys
+import tempfile
 import time
 
 IS_WINDOWS = os.name == "nt"
@@ -77,7 +78,12 @@ def ensure_utf8_console():
 
 
 class State:
-    """Tiny JSON state file (token / servers cache / system-proxy backup)."""
+    """Tiny JSON state file (token / servers cache / system-proxy backup).
+
+    v4.2.1: writes are ATOMIC (temp file + os.replace).  This file is
+    written from several threads (core + quick-task workers); two concurrent
+    plain open(...,"w") calls could interleave and truncate the JSON,
+    silently wiping the cached token/udid."""
 
     def __init__(self, path):
         self.path = path
@@ -93,9 +99,21 @@ class State:
 
     def save(self):
         try:
-            os.makedirs(os.path.dirname(self.path), exist_ok=True)
-            with open(self.path, "w", encoding="utf-8") as f:
-                json.dump(self.data, f, ensure_ascii=False, indent=2)
+            d = os.path.dirname(self.path)
+            if d:
+                os.makedirs(d, exist_ok=True)
+            fd, tmp = tempfile.mkstemp(prefix=".state-", suffix=".tmp",
+                                       dir=d or ".")
+            try:
+                with os.fdopen(fd, "w", encoding="utf-8") as f:
+                    json.dump(self.data, f, ensure_ascii=False, indent=2)
+                os.replace(tmp, self.path)
+            except Exception:
+                try:
+                    os.unlink(tmp)
+                except Exception:
+                    pass
+                raise
         except Exception as e:
             err(f"Could not save state file: {e}")
 

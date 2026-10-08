@@ -54,7 +54,19 @@ RESERVE_BUCKET_URLS = [
 SERVERS_CACHE_TTL_MS = 12 * 3600 * 1000     # 12 h
 TOKEN_SOFT_TTL_MS = 7 * 24 * 3600 * 1000    # refresh token after 7 days
 
-BACKOFF_SECONDS = [2, 5, 12, 25, 45]        # per attempt, rotated over domains
+# Per-attempt domain-rotation backoff.  v1.2.4: the old schedule
+# ([2,5,12,25,45] x 7 attempts) could stall a single API call for almost
+# three minutes before surfacing an error - the single biggest "it just
+# hangs" complaint.  The new budget surfaces a real failure in <= ~25 s
+# while still rotating across every domain.
+BACKOFF_SECONDS = [1, 2, 4, 8, 10]          # worst case ~25s per request
+
+IP_ECHO_MIRRORS = [
+    "https://api.ipify.org?format=json",
+    "https://ifconfig.me/ip",
+    "https://api.seeip.org/jsonip",
+    "https://ipinfo.io/json",
+]
 
 
 def _http_request(url, method="GET", headers=None, body=None, timeout=20):
@@ -124,15 +136,22 @@ class VeePNApi:
 
     async def _request(self, path, method="GET", body=None, auth=True,
                        attempts=None):
-        """Request with domain rotation + exponential backoff on 429/5xx."""
-        attempts = attempts if attempts is not None else len(BACKOFF_SECONDS) + 2
+        """Request with domain rotation + exponential backoff on 429/5xx.
+
+        v1.2.4: a cached token that the backend has since revoked used to
+        401 forever (the soft TTL is 7 days and nothing invalidated it),
+        killing server_list until the user deleted the state file by hand.
+        Now a 401/403 on an authed request invalidates the cached token,
+        fetches a fresh one and retries the request once."""
+        attempts = attempts if attempts is not None else len(BACKOFF_SECONDS) + 1
         domains = await self.get_domains()
-        headers = {}
-        if auth:
-            token = await self.ensure_token()
-            headers["Authorization"] = f"Bearer {token}"
         last_error = "unknown"
+        token_refreshed = False
         for attempt in range(attempts):
+            headers = {}
+            if auth:
+                token = await self.ensure_token(force=token_refreshed)
+                headers["Authorization"] = f"Bearer {token}"
             domain = domains[attempt % len(domains)]
             url = domain.rstrip("/") + path
             try:
@@ -142,10 +161,16 @@ class VeePNApi:
             except OSError as e:
                 last_error = f"{domain} unreachable ({e})"
                 self._say(f"  {last_error}, trying next domain...")
-                await asyncio.sleep(min(BACKOFF_SECONDS[attempt % len(BACKOFF_SECONDS)], 5))
+                await asyncio.sleep(min(BACKOFF_SECONDS[attempt % len(BACKOFF_SECONDS)], 3))
                 continue
             if 200 <= status < 300:
                 return payload
+            if auth and status in (401, 403) and not token_refreshed:
+                # cached credential rejected -> force one re-launch and retry
+                token_refreshed = True
+                last_error = f"HTTP {status} from {domain} (token rejected)"
+                self._say("  Access token rejected - requesting a fresh one...")
+                continue
             if status == 429 or 500 <= status:
                 wait = BACKOFF_SECONDS[min(attempt, len(BACKOFF_SECONDS) - 1)]
                 last_error = f"HTTP {status} from {domain}"
@@ -185,17 +210,26 @@ class VeePNApi:
                     for url in (d.get("free") or []):
                         if isinstance(url, str) and url.startswith("http"):
                             found.append(url)
-                    if payload.get("free"):
-                        found.append(payload["free"])
+                    # v1.2.4: only ever accept plain strings here.  The old
+                    # code appended whatever `payload["free"]` was - a list
+                    # or dict would later crash get_domains() consumers
+                    # (domain.rstrip on a non-str).
+                    extra = payload.get("free")
+                    if isinstance(extra, str) and extra.startswith("http"):
+                        found.append(extra)
+                    elif isinstance(extra, list):
+                        found.extend(u for u in extra
+                                     if isinstance(u, str) and u.startswith("http"))
             except Exception:
                 continue
         return found
 
     # ------------------------------------------------------------------ token
-    async def ensure_token(self) -> str:
+    async def ensure_token(self, force: bool = False) -> str:
         tok = self.state.get("token") or {}
         now = now_ms()
-        if tok.get("access") and now - tok.get("fetched_at", 0) < TOKEN_SOFT_TTL_MS:
+        if (not force) and tok.get("access") and \
+                now - tok.get("fetched_at", 0) < TOKEN_SOFT_TTL_MS:
             return tok["access"]
         if self.log:
             self._say("Requesting anonymous access token (POST /v3/launch/) ...")
@@ -261,6 +295,13 @@ class VeePNApi:
         if not isinstance(payload, list) or not payload:
             raise ApiError(0, {"message": f"No servers returned for region '{region}'"})
         servers = [s for s in payload if s.get("addresses") and s.get("port")]
+        # v1.2.4: a response of only malformed entries used to cache an
+        # EMPTY list for 12h, so the factory had zero servers and every
+        # connection failed with "no-server" until the cache expired.
+        if not servers:
+            raise ApiError(0, {"message":
+                f"Region '{region}' returned {len(payload)} unusable "
+                f"server entries"})
         prev = self.state.get("servers_cache") or {}
         prev[region] = {"servers": servers, "fetched_at": now}
         self.state.set("servers_cache", prev)
@@ -273,11 +314,29 @@ class VeePNApi:
 
     # -------------------------------------------------------------- ip checks
     async def check_ip_direct(self):
-        status, payload = await _http_request_async(
-            "https://api.ipify.org?format=json", timeout=15
-        )
-        if status == 200 and isinstance(payload, dict):
-            return payload.get("ip")
+        """Public IP via the first reachable echo mirror.
+
+        v1.2.4: only api.ipify.org was queried; when that host is slow or
+        blocked (common on some national networks) the GUI/CLI reported
+        'Could not determine your IP'.  Several mirrors are now tried in
+        turn with a short timeout each."""
+        for mirror in IP_ECHO_MIRRORS:
+            try:
+                status, payload = await _http_request_async(mirror, timeout=6)
+                if status != 200:
+                    continue
+                if isinstance(payload, dict):
+                    ip = payload.get("ip")
+                    if ip:
+                        return str(ip).strip()
+                elif isinstance(payload, str) and payload.strip():
+                    import re
+                    m = re.search(r"\b(\d{1,3}(?:\.\d{1,3}){3})\b",
+                                  payload.strip())
+                    if m:
+                        return m.group(1)
+            except Exception:
+                continue
         return None
 
 

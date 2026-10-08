@@ -166,7 +166,8 @@ async def connect_via_server(server: dict, target_host: str, target_port: int,
     )
 
 
-async def check_exit_ip(server: dict, insecure_tls: bool = False) -> str:
+async def check_exit_ip(server: dict, insecure_tls: bool = False,
+                        connect_timeout: float = 10.0) -> str:
     """
     One-shot test: fetch api.ipify.org through the upstream proxy.
 
@@ -182,7 +183,8 @@ async def check_exit_ip(server: dict, insecure_tls: bool = False) -> str:
         tls_ctx.verify_mode = ssl.CERT_NONE
     port = 443 if use_inner_tls else 80
     reader, writer = await connect_via_server(
-        server, "api.ipify.org", port, insecure_tls=insecure_tls
+        server, "api.ipify.org", port, insecure_tls=insecure_tls,
+        connect_timeout=connect_timeout,
     )
     try:
         if use_inner_tls:

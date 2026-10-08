@@ -78,7 +78,11 @@ def _wininet_refresh():
 
 # -------------------------------------------------------------------- linux
 def _gnome_available():
-    return shutil.which("gsettings") is not None and os.environ.get("DISPLAY") or os.environ.get("WAYLAND_DISPLAY")
+    # v1.2.4 fix: operator precedence - the old "A and B or C" returned a
+    # truthy WAYLAND string even without gsettings, then every gsettings
+    # call silently failed while system_on still claimed success.
+    return shutil.which("gsettings") is not None and bool(
+        os.environ.get("DISPLAY") or os.environ.get("WAYLAND_DISPLAY"))
 
 
 def _gsettings(args):
