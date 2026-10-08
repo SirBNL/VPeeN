@@ -301,6 +301,7 @@ class VPeeNApp(ctk.CTk):
         self.pending_tunnel = False
         self.stop_after_tunnel = False
         self._stopping = False
+        self._last_error = None         # v4.2.2: keep the error visible
 
         # location model
         self.loc_rows = []              # [{label,country,city,cc,free,region}]
@@ -931,6 +932,7 @@ class VPeeNApp(ctk.CTk):
     def _set_phase(self, phase, detail=None):
         self.phase = phase
         if phase == "connecting":
+            self._last_error = None
             self.lbl_status.configure(text="Connecting...")
             self.lbl_sub.configure(text="Negotiating a secure tunnel")
             self.nav_dot.configure(text="●  Connecting", text_color=WARN)
@@ -958,7 +960,16 @@ class VPeeNApp(ctk.CTk):
             self._stop_scramble()
             self.conn_mode = "proxy"
             self.lbl_status.configure(text="Not Connected")
-            self.lbl_sub.configure(text="Your real IP is exposed")
+            # v4.2.2: the core emits phase=error and then phase=disconnected,
+            # so the error used to be visible for one 120ms poll tick and then
+            # overwritten by "Your real IP is exposed" - the user never saw
+            # WHY the connect failed.  Keep the last error on screen.
+            if self._last_error:
+                self.lbl_sub.configure(text=f"Last error: {self._last_error}",
+                                       text_color=RED)
+            else:
+                self.lbl_sub.configure(text="Your real IP is exposed",
+                                       text_color=SUBTLE)
             self.nav_dot.configure(text="●  Offline", text_color="#aebfe8")
             self.strip_dot.configure(text="●  Offline", text_color="#aebfe8")
             self.lbl_ip.configure(text=f"IP: {self.direct_ip or '--'}")
@@ -969,6 +980,7 @@ class VPeeNApp(ctk.CTk):
         elif phase == "error":
             self._stop_pulse(connected=False)
             self._stop_scramble()
+            self._last_error = str(detail or "Unknown error")
             self.lbl_status.configure(text="Something went wrong")
             self.lbl_sub.configure(text=str(detail or "Unknown error"))
             self.nav_dot.configure(text="●  Error", text_color=RED)
@@ -1225,19 +1237,6 @@ class VPeeNApp(ctk.CTk):
         self.strip_info.configure(text=self._strip_text())
         self._log_line("Settings saved.", "ok")
 
-    def _reset_session(self):
-        from tkinter import messagebox
-        if messagebox.askyesno(
-                "Reset session",
-                "Delete the cached VeePN token?\n"
-                "A fresh anonymous token is fetched on next connect."):
-            try:
-                from .cli import DEFAULT_STATE_PATH
-                os.remove(DEFAULT_STATE_PATH)
-            except OSError:
-                pass
-            self._log_line("VeePN session cleared.", "ok")
-
     # ====================================================== tunnel orchestration
     def _tunnel_event(self, ev):
         phase = ev.get("phase")
@@ -1259,15 +1258,29 @@ class VPeeNApp(ctk.CTk):
                 self.conn_mode = "proxy"
                 self.strip_info.configure(text=self._strip_text())
                 self._log_line("Fell back to proxy mode.", "warn")
+            elif self.phase == "connecting":
+                # v4.2.2: the tunnel died while connecting (helper lost,
+                # worker error without an explicit error event) - the proxy
+                # listeners ARE up at this point, so land in proxy mode
+                # instead of spinning in "Connecting..." forever.
+                self.conn_mode = "proxy"
+                self._log_line("Tunnel did not come up - continuing in "
+                               "proxy mode.", "warn")
+                self._set_phase("connected", self._region_label())
         elif phase == "error":
             if self.phase == "connecting":
+                # v4.2.2: ALWAYS fall back here.  The old code required
+                # exit_ip to be known; when the upstream check had failed the
+                # UI stayed stuck in "Connecting..." forever.
                 self._log_line(f"Tunnel failed ({ev.get('detail')}) - "
                                f"staying in proxy mode.", "err")
                 self.conn_mode = "proxy"
-                if self.exit_ip:
-                    self._set_phase("connected", "proxy")
+                self._set_phase("connected", self._region_label())
             else:
                 self._log_line(f"Tunnel error: {ev.get('detail')}", "err")
+
+    def _region_label(self):
+        return (self._selected_row() or {}).get("city") or "optimal"
 
     # ----------------------------------------------------------------- ticks
     def _tick(self):
@@ -1339,16 +1352,18 @@ class VPeeNApp(ctk.CTk):
             upstream_ips=lst.get("upstream_ips", []),
             mtu=int(self.cfg.get("tunnel_mtu", 1500)),
             dns=bool(self.cfg.get("tunnel_dns", True)))
-        # safety: if the tunnel never comes up, still show proxy-mode success
-        self.after(30000, self._tunnel_up_watchdog)
+        # safety: if the tunnel never comes up, still show proxy-mode success.
+        # v4.2.2: 45s (was 30s) - the elevated helper is allowed 40s by its
+        # own CONNECT_TIMEOUT (a UAC prompt easily takes that long), so the
+        # old 30s watchdog pre-empted a perfectly healthy pending prompt.
+        self.after(45000, self._tunnel_up_watchdog)
 
     def _tunnel_up_watchdog(self):
-        if self.phase == "connecting" and self.tunnel.state != "up" \
-                and self.exit_ip:
+        if self.phase == "connecting" and self.tunnel.state != "up":
             self._log_line("Tunnel not confirmed - continuing in proxy mode.",
                            "warn")
             self.conn_mode = "proxy"
-            self._set_phase("connected", "proxy")
+            self._set_phase("connected", self._region_label())
 
     def _fill_locations(self, ev):
         data = ev.get("data")

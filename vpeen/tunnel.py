@@ -118,6 +118,7 @@ class TunnelWorker:
         self._tasks: set = set()            # anchored tasks (asyncio keeps
         self._tun2socks_logf = None        # only weak refs - unanchored
                                             # tasks can be GC'd mid-flight)
+        self._up_task = None               # in-flight "up" guard (v4.2.2)
 
     # ------------------------------------------------------------- lifecycle
     def _spawn(self, coro):
@@ -204,7 +205,11 @@ class TunnelWorker:
             self.mtu = int(cfg.get("mtu", 1500))
             self.upstream_ips = list(cfg.get("upstream_ips", []))
             self.dns_enabled = bool(cfg.get("dns", True))
-            self._spawn(self._up())
+            # v4.2.2: guard against two "up" commands racing - the old code
+            # spawned _up() for each, and two concurrent runs could launch
+            # two tun2socks processes and interleave route setup.
+            if self._up_task is None or self._up_task.done():
+                self._up_task = self._spawn(self._up())
         elif cmd == "down":
             self.last_ping = time.time()
             self._spawn(self._down("requested by app"))
@@ -286,8 +291,12 @@ class TunnelWorker:
             if journal is None:
                 raise OSError(err or "route setup failed")
             self.journal = journal
+            # v4.2.2: ok=False means the def1 hijack (or the adapter) failed -
+            # traffic would NOT actually be routed through the tunnel, yet the
+            # old code still broadcast "up" and the GUI showed "Protected".
+            # That is a silent no-VPN lie; fail loudly and tear down instead.
             if not ok:
-                self.blog(f"route setup incomplete: {err}", "warn")
+                raise OSError(f"route setup failed: {err or 'incomplete'}")
             # sanity: the address should now be present (netsh/ip are sync)
             await self._verify_address()
 
@@ -440,24 +449,49 @@ class TunnelWorker:
             raise
 
     async def _refresh_host_routes(self):
-        """Server list rotated in the GUI: replace anti-loop host routes."""
+        """Server list rotated in the GUI: replace anti-loop host routes.
+
+        v4.2.2 CRITICAL fix: the old keep-filter dropped the DEFAULT-HIJACK
+        routes from the journal on Linux (0.0.0.0/1 + 128.0.0.0/1 have no
+        mask) and macOS (the eight net chunks are /8../1 prefixes).  After a
+        credential rotation, bring_down() then no longer deleted them, so
+        disconnecting left all traffic routed into the dead TUN adapter -
+        a total network blackout until reboot.  The journal now only ever
+        loses entries that ARE host routes (the ones this refresh replaces)."""
         if self.state != "up" or not self.journal:
             return
+
+        def _is_host_route(r):
+            if r.get("type") != "route":
+                return False
+            if sys_platform.startswith("win"):
+                return r.get("mask") == "255.255.255.255"
+            if sys_platform == "linux":
+                return str(r.get("prefix", "")).endswith("/32")
+            if sys_platform == "darwin":
+                return r.get("kind") == "host"
+            return False
+
         try:
-            keep = [r for r in self.journal.get("routes", [])
-                    if r.get("type") != "route" or "/1" not in r.get("prefix", "")
-                    or r.get("mask") == "128.0.0.0"]
-            # remove old host routes then add new ones
-            host_routes = [r for r in self.journal.get("routes", [])
-                           if r.get("type") == "route" and
-                           r.get("mask") == "255.255.255.255"]
+            routes = self.journal.get("routes", [])
+            keep = [r for r in routes if not _is_host_route(r)]
+            host_routes = [r for r in routes if _is_host_route(r)]
             for r in host_routes:
                 if sys_platform.startswith("win"):
                     plat.run(["route", "delete", r["prefix"], "mask", r["mask"],
                               r["gw"]])
                 elif sys_platform == "linux":
-                    plat.run(["ip", "route", "del", f"{r['prefix']}/32",
-                              "via", r["via"]])
+                    # journal prefixes already carry /32 - do not double it
+                    # (the old f"{r['prefix']}/32" built 'ip/32/32' and the
+                    # stale route was never actually deleted)
+                    prefix = str(r["prefix"])
+                    if not prefix.endswith("/32"):
+                        prefix += "/32"
+                    if r.get("via"):
+                        plat.run(["ip", "route", "del", prefix,
+                                  "via", r["via"]])
+                    else:
+                        plat.run(["ip", "route", "del", prefix])
                 elif sys_platform == "darwin":
                     plat.run(["route", "-n", "delete", "-host", r["prefix"],
                               r["gw"]])
@@ -476,7 +510,11 @@ class TunnelWorker:
                                       "mask": "255.255.255.255", "gw": gw,
                                       "metric": "1", "if": idx})
                 elif sys_platform == "linux":
-                    gw, _dev = orig
+                    # v4.2.2: _orig_route_triple returns a TRIPLE - the old
+                    # 'gw, _dev = orig' raised 'too many values to unpack',
+                    # so after a rotation NO fresh host routes were ever
+                    # added on Linux and the tunnel silently broke.
+                    gw, _dev, _idx = orig
                     rc, _, _ = plat.run(["ip", "route", "add", f"{ip}/32",
                                          "via", gw])
                     if rc == 0:
@@ -839,12 +877,10 @@ def _cleanup_main(session_path: str) -> int:
 def main(argv=None) -> int:
     argv = argv if argv is not None else sys.argv[1:]
     if "--tunnel-worker" in argv:
-        i = argv.index("--tunnel-worker")
         port = int(argv[argv.index("--ctl-port") + 1]) if "--ctl-port" in argv else 0
         token = argv[argv.index("--ctl-token") + 1] if "--ctl-token" in argv else ""
         return _worker_main(port, token)
     if "--tunnel-cleanup" in argv:
-        i = argv.index("--tunnel-cleanup")
         path = argv[argv.index("--session") + 1] if "--session" in argv else \
             plat.SESSION_PATH
         return _cleanup_main(path)

@@ -245,6 +245,7 @@ class Core:
             self._emit(type="phase", phase=PHASE_ERROR, detail=str(e))
         finally:
             self.factory = None
+            self.stats = None
             try:
                 # a stop() cancellation must not abort the cleanup itself
                 cur = asyncio.current_task()

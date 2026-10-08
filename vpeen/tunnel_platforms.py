@@ -245,9 +245,14 @@ def win_up(mtu, upstream_ips, orig=None):
         time.sleep(1.0)
         rc, _, err = run(addr_cmd, check=True)
     journal["routes"].append({"type": "addr", "iface": tun})
+    # v4.2.2: this used to be run(..., check=True) - a failure raised and
+    # killed the whole tunnel UP for a purely cosmetic adapter-DNS step.
+    # It is best-effort now; the relay still works without it.
     rc, _, err = run(["netsh", "interface", "ipv4", "set", "dnsservers",
                       f"name={tun}", "static", f"address={TUN_IP}",
-                      "register=none", "validate=no"], check=True)
+                      "register=none", "validate=no"])
+    if rc != 0:
+        _log(f"adapter DNS set failed (non-fatal): {err}", "warn")
     journal["routes"].append({"type": "dnsadapter", "iface": tun})
 
     tun_idx = _win_tun_index()
@@ -356,11 +361,18 @@ def linux_up(mtu, upstream_ips, orig=None):
     run(["ip", "link", "set", tun, "up"])
     journal["routes"].append({"type": "addr", "iface": tun})
 
+    # v4.2.2: remember the ORIGINAL rp_filter value and journal it - the old
+    # teardown hardcoded 2 (loose mode) regardless of the machine's policy.
+    orig_rf = None
+    rc, out, _ = run(["sysctl", "-n", f"net.ipv4.conf.{dev}.rp_filter"])
+    if rc == 0 and out.strip().isdigit():
+        orig_rf = out.strip()
     rc, _, err = run(["sysctl", "-w",
                       f"net.ipv4.conf.{dev}.rp_filter=0"])
     if rc == 0:
         journal["routes"].append({"type": "sysctl",
-                                  "key": f"net.ipv4.conf.{dev}.rp_filter"})
+                                  "key": f"net.ipv4.conf.{dev}.rp_filter",
+                                  "old": orig_rf})
 
     for ip in upstream_ips:
         rc, _, err = run(["ip", "route", "add", f"{ip}/32", "via", gw])
@@ -399,7 +411,12 @@ def linux_down(journal):
                 else:
                     run(["ip", "route", "del", r["prefix"], "dev", r["dev"]])
             elif r["type"] == "sysctl":
-                run(["sysctl", "-w", f"{r['key']}={2 if 'rp_filter' in r['key'] else 1}"])
+                # restore the machine's ORIGINAL value; fall back to the old
+                # hardcoded guess only when it was never captured
+                old = r.get("old")
+                val = old if old else (
+                    "2" if "rp_filter" in r["key"] else "1")
+                run(["sysctl", "-w", f"{r['key']}={val}"])
             elif r["type"] == "addr":
                 run(["ip", "addr", "flush", "dev", r["iface"]])
         except Exception as e:

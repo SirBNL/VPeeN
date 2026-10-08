@@ -22,7 +22,9 @@ Stability design (v4.1):
 """
 import asyncio
 import collections
+import ipaddress
 import time
+from urllib.parse import urlsplit
 
 from .upstream import (SOCK_ERRORS, UpstreamError, connect_via_server,
                        enable_keepalive)
@@ -374,6 +376,14 @@ class LocalProxyServer:
 
     # -------------------------------------------------------------- socks5
     async def handle_socks5(self, client_reader, client_writer):
+        # v4.2.2: upstream socket LEAK fix (mirrors the CLI fix).  Everything
+        # between a successful factory.open() and the hand-off to _tunnel can
+        # raise if the client resets at that exact moment - the old handler
+        # closed only the CLIENT side and the upstream tunnel stayed open
+        # until keepalive reaped it.  Ownership is explicit now: the finally
+        # below closes upstream_writer unless it was handed to _tunnel
+        # (which closes both sides; a second close is a harmless no-op).
+        upstream_writer = None
         try:
             # --- greeting
             header = await self._readexactly(client_reader, 2)
@@ -408,7 +418,6 @@ class LocalProxyServer:
                     return
             elif atyp == 0x04:    # IPv6
                 raw = await self._readexactly(client_reader, 16)
-                import ipaddress
                 host = str(ipaddress.IPv6Address(raw))
             else:
                 client_writer.write(b"\x05\x08\x00\x01" + b"\x00" * 6)
@@ -424,11 +433,13 @@ class LocalProxyServer:
             try:
                 upstream_reader, upstream_writer = await self.factory.open(host, port)
             except UpstreamError as e:
+                upstream_writer = None
                 self.stats.note_fail(fail_reason(e), f"{host}:{port}")
                 code = e.socks_code if e.socks_code != 0 else SOCK_ERRORS["general"]
                 await self._reply_fail(client_writer, code)
                 return
             except Exception as e:
+                upstream_writer = None
                 self.stats.note_fail(fail_reason(e), f"{host}:{port}")
                 await self._reply_fail(client_writer, SOCK_ERRORS["general"])
                 return
@@ -439,7 +450,8 @@ class LocalProxyServer:
             client_writer.write(b"\x05\x00\x00\x01" + b"\x00" * 6)
             await client_writer.drain()
             self.stats.connections += 1
-            await _tunnel(client_writer, upstream_writer,
+            uw, upstream_writer = upstream_writer, None   # hand-off to _tunnel
+            await _tunnel(client_writer, uw,
                           client_reader, upstream_reader, self.stats)
         except asyncio.CancelledError:
             # never swallow cancellation (shutdown depends on it)
@@ -461,9 +473,16 @@ class LocalProxyServer:
                 client_writer.close()
             except Exception:
                 pass
+        finally:
+            if upstream_writer is not None:
+                try:
+                    upstream_writer.close()
+                except Exception:
+                    pass
 
     # ------------------------------------------------------------------ http
     async def handle_http(self, client_reader, client_writer):
+        upstream_writer = None      # leak guard - see handle_socks5 (v4.2.2)
         try:
             try:
                 head = await asyncio.wait_for(
@@ -493,6 +512,7 @@ class LocalProxyServer:
                 try:
                     upstream_reader, upstream_writer = await self.factory.open(host, port)
                 except Exception as e:
+                    upstream_writer = None
                     self.stats.note_fail(fail_reason(e), f"{host}:{port}")
                     client_writer.write(
                         b"HTTP/1.1 502 Bad Gateway\r\n"
@@ -506,12 +526,12 @@ class LocalProxyServer:
                 client_writer.write(b"HTTP/1.1 200 Connection established\r\n\r\n")
                 await client_writer.drain()
                 self.stats.connections += 1
-                await _tunnel(client_writer, upstream_writer,
+                uw, upstream_writer = upstream_writer, None   # hand-off
+                await _tunnel(client_writer, uw,
                               client_reader, upstream_reader, self.stats)
                 return
 
             # ---- plain HTTP (absolute-form) forwarding
-            from urllib.parse import urlsplit
             sp = urlsplit(target)
             host = sp.hostname or ""
             port = sp.port or 80
@@ -524,6 +544,7 @@ class LocalProxyServer:
             try:
                 upstream_reader, upstream_writer = await self.factory.open(host, port)
             except Exception as e:
+                upstream_writer = None
                 self.stats.note_fail(fail_reason(e), f"{host}:{port}")
                 client_writer.write(b"HTTP/1.1 502 Bad Gateway\r\n\r\n")
                 await client_writer.drain()
@@ -596,3 +617,8 @@ class LocalProxyServer:
                 client_writer.close()
             except Exception:
                 pass
+            if upstream_writer is not None:
+                try:
+                    upstream_writer.close()
+                except Exception:
+                    pass

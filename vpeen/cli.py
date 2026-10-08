@@ -4,7 +4,6 @@ All user-facing strings are Persian to match the tool's audience.
 """
 import argparse
 import asyncio
-import json
 import os
 import signal
 import sys
@@ -21,11 +20,6 @@ DEFAULT_STATE_PATH = os.path.join(os.path.expanduser("~"), ".vpeen", "state.json
 DEFAULT_SOCKS_PORT = 1080
 DEFAULT_HTTP_PORT = 8080
 
-REGION_ALIASES = {
-    "nl": "Amsterdam", "fr-prs": "Paris", "gb-lnd": "London",
-    "us-va": "Virginia", "us-or": "Oregon", "sg": "Singapore",
-    "ru-spb": "Saint Petersburg",
-}
 
 
 def _state_path(args):
@@ -308,14 +302,14 @@ async def cmd_run(args):
             t.cancel()
         if client_tasks:
             await asyncio.gather(*client_tasks, return_exceptions=True)
-        try:
-            await socks_srv.wait_closed()
-        except Exception:
-            pass
-        try:
-            await http_srv.wait_closed()
-        except Exception:
-            pass
+        # v1.2.5: bound the wait - a Python 3.12.x Server.wait_closed() quirk
+        # can hang forever when handlers completed just before close(); the
+        # GUI core already bounds this with wait_for(10).
+        for srv in (socks_srv, http_srv):
+            try:
+                await asyncio.wait_for(srv.wait_closed(), timeout=10)
+            except Exception:
+                pass
         if args.set_system:
             system_off(api.state)
         # dump the last failures with targets so the log file can be

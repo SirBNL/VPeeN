@@ -1,6 +1,7 @@
 """VPeeN settings persistence (JSON under ~/.vpeen/)."""
 import json
 import os
+import tempfile
 
 CONFIG_DIR = os.path.join(os.path.expanduser("~"), ".vpeen")
 CONFIG_PATH = os.path.join(CONFIG_DIR, "settings.json")
@@ -37,10 +38,23 @@ def load() -> dict:
 
 
 def save(cfg: dict) -> None:
+    """v4.2.2: atomic write (temp file + os.replace) - a crash or two racing
+    writers mid-dump used to be able to leave a truncated settings.json,
+    silently resetting every setting to defaults on next launch."""
     try:
         os.makedirs(CONFIG_DIR, exist_ok=True)
         data = {k: cfg.get(k, DEFAULTS[k]) for k in DEFAULTS}
-        with open(CONFIG_PATH, "w", encoding="utf-8") as f:
-            json.dump(data, f, indent=2)
+        fd, tmp = tempfile.mkstemp(prefix=".settings-", suffix=".tmp",
+                                   dir=CONFIG_DIR)
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as f:
+                json.dump(data, f, indent=2)
+            os.replace(tmp, CONFIG_PATH)
+        except Exception:
+            try:
+                os.unlink(tmp)
+            except OSError:
+                pass
+            raise
     except OSError:
         pass

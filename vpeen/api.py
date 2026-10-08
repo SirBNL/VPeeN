@@ -22,6 +22,7 @@ import asyncio
 import base64
 import json
 import random
+import re
 import ssl
 import urllib.request
 import urllib.error
@@ -183,17 +184,27 @@ class VeePNApi:
 
     # ------------------------------------------------------ domain discovery
     async def get_domains(self):
-        """Default domains + reserve domains fetched from public buckets."""
+        """Default domains + reserve domains fetched from public buckets.
+
+        v4.2.2: a failed reserve-bucket fetch (returns []) used to be cached
+        for 24h - a transient S3 outage poisoned the reserve list for a day.
+        Empty results are no longer cached; a stale non-empty cache is kept
+        until a fresh one arrives."""
         if self._domains:
             return self._domains
         domains = list(DEFAULT_FREE_DOMAINS)
         cached = self.state.get("reserve_domains")
         now = now_ms()
-        if cached and now - cached.get("fetched_at", 0) < 24 * 3600 * 1000:
+        if cached and cached.get("free") and \
+                now - cached.get("fetched_at", 0) < 24 * 3600 * 1000:
             extra = cached.get("free", [])
         else:
             extra = await self._fetch_reserve_domains()
-            self.state.set("reserve_domains", {"free": extra, "fetched_at": now})
+            if extra:
+                self.state.set("reserve_domains",
+                               {"free": extra, "fetched_at": now})
+            elif cached and cached.get("free"):
+                extra = cached.get("free")   # stale but better than none
         for d in extra:
             if d not in domains:
                 domains.append(d)
@@ -330,7 +341,6 @@ class VeePNApi:
                     if ip:
                         return str(ip).strip()
                 elif isinstance(payload, str) and payload.strip():
-                    import re
                     m = re.search(r"\b(\d{1,3}(?:\.\d{1,3}){3})\b",
                                   payload.strip())
                     if m:

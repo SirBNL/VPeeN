@@ -14,12 +14,22 @@ v1.2 hardening:
 """
 import asyncio
 import base64
+import json
+import re
 import socket
 import ssl
 
 CHUNK = 65536
 
 from .api import USER_AGENT
+
+# Hosts probed for the exit IP through a freshly opened tunnel.
+# v4.2.2: only api.ipify.org was queried; when it is slow or blocked the
+# whole "is the tunnel alive" check fails even though the tunnel is fine.
+EXIT_IP_PROBES = (
+    ("api.ipify.org", "/?format=json"),
+    ("ifconfig.me", "/"),
+)
 
 SOCK_ERRORS = {
     "general": 0x01,
@@ -55,6 +65,21 @@ def _classify_connect_failure(status_line: str):
     if "refused" in s or " 500" in s or " 502" in s or " 503" in s or " 504" in s:
         return SOCK_ERRORS["refused"], code
     return SOCK_ERRORS["general"], code
+
+
+def _fmt_target(host: str) -> str:
+    """Format a host for the CONNECT request line.
+
+    v4.2.2: bare IPv6 literals produced 'CONNECT 2001:db8::1:443', which is
+    ambiguous and rejected by RFC 7231-aware proxies - they must be
+    bracketed ('CONNECT [2001:db8::1]:443').  Hostnames and IPv4 pass
+    through untouched; already-bracketed hosts are not double-bracketed."""
+    host = (host or "").strip()
+    if host.startswith("[") and host.endswith("]"):
+        return host                       # already bracketed
+    if ":" in host:
+        return f"[{host}]"
+    return host
 
 
 def enable_keepalive(writer, idle_hint=45):
@@ -98,6 +123,7 @@ async def connect_via_server(server: dict, target_host: str, target_port: int,
     if not addresses or not port:
         raise UpstreamError("Malformed server entry")
 
+    target = _fmt_target(target_host)
     last_exc = None
     for host in addresses:
         writer = None
@@ -113,8 +139,8 @@ async def connect_via_server(server: dict, target_host: str, target_port: int,
             )
             auth = base64.b64encode(f"{username}:{password}".encode()).decode()
             req = (
-                f"CONNECT {target_host}:{target_port} HTTP/1.1\r\n"
-                f"Host: {target_host}:{target_port}\r\n"
+                f"CONNECT {target}:{target_port} HTTP/1.1\r\n"
+                f"Host: {target}:{target_port}\r\n"
                 f"Proxy-Authorization: Basic {auth}\r\n"
                 f"User-Agent: {USER_AGENT}\r\n"
                 f"Proxy-Connection: keep-alive\r\n\r\n"
@@ -169,13 +195,37 @@ async def connect_via_server(server: dict, target_host: str, target_port: int,
 async def check_exit_ip(server: dict, insecure_tls: bool = False,
                         connect_timeout: float = 10.0) -> str:
     """
-    One-shot test: fetch api.ipify.org through the upstream proxy.
+    One-shot test: fetch the public IP through the upstream proxy.
 
     Inside a CONNECT tunnel the CLIENT must do TLS with the target itself
     (the proxy only relays bytes), so after CONNECT we upgrade to TLS like a
     browser would (StreamWriter.start_tls, Python 3.11+).  On older Pythons
     we fall back to the plain-HTTP (port 80) variant of the IP service.
+
+    v4.2.2: two echo hosts are tried instead of one, so a blocked/slow
+    ipify no longer makes every healthy tunnel look dead.
     """
+    last = None
+    for echo_host, path in EXIT_IP_PROBES:
+        try:
+            ip = await _exit_ip_via(server, echo_host, path,
+                                    insecure_tls=insecure_tls,
+                                    connect_timeout=connect_timeout)
+            if ip:
+                return ip
+            # tunnel opened but no IP in the answer -> try the next mirror
+        except UpstreamError:
+            raise            # tunnel itself failed - mirrors will not help
+        except Exception as e:
+            last = e         # inner TLS/HTTP hiccup -> try the next mirror
+    if last is not None:
+        raise last
+    return None
+
+
+async def _exit_ip_via(server: dict, echo_host: str, path: str,
+                       insecure_tls: bool = False,
+                       connect_timeout: float = 10.0) -> str:
     use_inner_tls = hasattr(asyncio.StreamWriter, "start_tls")
     tls_ctx = ssl.create_default_context()
     if insecure_tls:
@@ -183,19 +233,19 @@ async def check_exit_ip(server: dict, insecure_tls: bool = False,
         tls_ctx.verify_mode = ssl.CERT_NONE
     port = 443 if use_inner_tls else 80
     reader, writer = await connect_via_server(
-        server, "api.ipify.org", port, insecure_tls=insecure_tls,
+        server, echo_host, port, insecure_tls=insecure_tls,
         connect_timeout=connect_timeout,
     )
     try:
         if use_inner_tls:
             # StreamWriter.start_tls upgrades in place and returns None.
-            await writer.start_tls(tls_ctx, server_hostname="api.ipify.org")
+            await writer.start_tls(tls_ctx, server_hostname=echo_host)
         req = (
-            "GET /?format=json HTTP/1.1\r\n"
-            "Host: api.ipify.org\r\n"
-            "User-Agent: " + USER_AGENT + "\r\n"
-            "Accept: application/json\r\n"
-            "Connection: close\r\n\r\n"
+            f"GET {path} HTTP/1.1\r\n"
+            f"Host: {echo_host}\r\n"
+            f"User-Agent: {USER_AGENT}\r\n"
+            f"Accept: */*\r\n"
+            f"Connection: close\r\n\r\n"
         )
         writer.write(req.encode("latin-1"))
         await writer.drain()
@@ -213,11 +263,9 @@ async def check_exit_ip(server: dict, insecure_tls: bool = False,
             total += len(data)
         text = b"".join(chunks).decode("utf-8", errors="replace")
         body = text.split("\r\n\r\n", 1)[1] if "\r\n\r\n" in text else text
-        import json
         try:
             return json.loads(body.strip()).get("ip")
         except Exception:
-            import re
             m = re.search(r"\b(\d{1,3}(?:\.\d{1,3}){3})\b", body)
             return m.group(1) if m else None
     finally:

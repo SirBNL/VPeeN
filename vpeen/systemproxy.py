@@ -27,13 +27,6 @@ def _state_backup_key():
     return "system_proxy_backup"
 
 
-def _backup_and_store(state, values: dict):
-    old = {}
-    for k in values:
-        old[k] = _winreg_read(k)
-    state.set(_state_backup_key(), old)
-
-
 # ------------------------------------------------------------------- windows
 def _winreg_read(name):
     import winreg
