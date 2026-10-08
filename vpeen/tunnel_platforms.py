@@ -95,41 +95,123 @@ def clear_session() -> None:
 
 
 # ================================================================ WINDOWS
-def _win_orig_route():
-    """Default IPv4 route: (gw, interface_alias, ifindex)."""
-    rc, out, _ = run(["route", "print", "-4"], timeout=15)
+def _parse_route_print(out: str):
+    """Parse `route print -4` output: return default-route rows from the
+    ACTIVE routes table only -> [(gw, iface_ip, metric)].
+    NOTE: the Interface column is an IP ADDRESS (not an index!) and the
+    gateway may be 'On-link' (PPPoE / some DHCP / hotspots)."""
+    rows = []
+    in_active = False
+    for ln in out.splitlines():
+        s = ln.strip()
+        if s.startswith("Active Routes:"):
+            in_active = True
+            continue
+        if not in_active:
+            continue
+        if s.startswith("Persistent Routes"):
+            break
+        if not s:
+            if rows:
+                break       # blank line after the table ends it
+            continue
+        if s.startswith("Network Destination") or set(s) <= {"="}:
+            continue
+        parts = s.split()
+        if len(parts) >= 5 and parts[0] == "0.0.0.0" and parts[1] == "0.0.0.0":
+            gw, iface_ip = parts[2], parts[3]
+            metric = int(parts[4]) if parts[4].isdigit() else 9999
+            rows.append((gw, iface_ip, metric))
+    return rows
+
+
+def _parse_netsh_addresses(out: str):
+    """Parse `netsh interface ipv4 show addresses` -> blocks of
+    (iface_name, body).  Used to map the interface IP from route print to
+    the interface NAME (the route print table never shows ifindexes)."""
+    blocks = []
+    parts = re.split(r'Configuration for interface "([^"]+)"', out)
+    # re.split keeps separators: ['', name1, body1, name2, body2, ...]
+    for i in range(1, len(parts) - 1, 2):
+        blocks.append((parts[i].strip(), parts[i + 1]))
+    return blocks
+
+
+def _parse_netsh_interfaces(out: str):
+    """Parse `netsh interface ipv4 show interfaces` -> [(ifindex, name)].
+    v4.2.0 fix: the old regexes lumped the State column into the Name
+    ("connected     VPeeN"), so the adapter was never detected. Columns
+    are separated by 2+ spaces; the Name is everything after State (and
+    names themselves contain single spaces)."""
+    rows = []
+    for ln in out.splitlines():
+        s = ln.strip()
+        if not s or set(s) <= {"-"}:
+            continue
+        parts = re.split(r"\s{2,}", s)
+        if len(parts) >= 5 and parts[0].isdigit():
+            rows.append((int(parts[0]), " ".join(parts[4:]).strip()))
+    return rows
+
+
+def _win_iface_index_by_name(name: str):
+    """ifindex for a netsh interface name, or None."""
+    rc, out, _ = run(["netsh", "interface", "ipv4", "show", "interfaces"],
+                     timeout=15)
     if rc == 0:
-        # parse the 'Active Routes' table: network, netmask, gw, iface, metric
-        lines = out.splitlines()
-        in_tbl = False
-        best = None
-        for ln in lines:
-            if "0.0.0.0" in ln and "0.0.0.0" in ln:
-                parts = ln.split()
-                if len(parts) >= 5 and parts[0] == "0.0.0.0" and parts[1] == "0.0.0.0":
-                    gw = parts[2]
-                    idx = int(parts[3])
-                    metric = int(parts[4]) if parts[4].isdigit() else 9999
-                    if gw in ("On-link", "on-link"):
-                        continue
-                    if best is None or metric < best[0]:
-                        best = (metric, gw, idx)
-                in_tbl = True
-        if best:
-            metric, gw, idx = best
-            alias = _win_iface_alias(idx)
-            return gw, alias, idx
+        for idx, nm in _parse_netsh_interfaces(out):
+            if nm == name:
+                return idx
     return None
+
+
+def _win_iface_of_ip(ip: str):
+    """(name, ifindex) of the interface owning `ip` via netsh show
+    addresses, best effort. Returns (None, None) if not found."""
+    rc, out, _ = run(["netsh", "interface", "ipv4", "show", "addresses"],
+                     timeout=15)
+    if rc == 0:
+        for name, body in _parse_netsh_addresses(out):
+            if re.search(rf"\b{re.escape(ip)}\b", body):
+                idx = _win_iface_index_by_name(name)
+                return name, idx
+    return None, None
+
+
+def _win_orig_route():
+    """Default IPv4 route: (gw, iface_alias, ifindex) - or (gw, None, None)
+    if the alias/index could not be mapped.  NEVER raises.
+    v4.2.0 rewrite: the old code did int(parts[3]) on the Interface column,
+    which is an IP ADDRESS -> ValueError on every Windows machine, so the
+    tunnel always failed with 'invalid literal for int()'."""
+    try:
+        rc, out, _ = run(["route", "print", "-4"], timeout=15)
+        if rc != 0:
+            return None
+        rows = _parse_route_print(out)
+        if not rows:
+            return None
+        rows.sort(key=lambda r: r[2])       # lowest metric first
+        gw, iface_ip, _metric = rows[0]
+        onlink = gw.lower().replace("_", "-") in ("on-link", "onlink")
+        name, idx = _win_iface_of_ip(iface_ip)
+        if onlink:
+            # on-link default: use the interface's own address as gateway
+            gw = iface_ip
+        if name is None and idx is None:
+            return gw, None, None
+        return gw, name, idx
+    except Exception:
+        return None
 
 
 def _win_iface_alias(ifindex: int) -> str:
     rc, out, _ = run(["netsh", "interface", "ipv4", "show", "interfaces"],
                      timeout=15)
     if rc == 0:
-        for ln in out.splitlines():
-            m = re.match(r"\s*(\d+)\s+(\S+)\s+.*?\s{2,}(\S.+)$", ln)
-            if m and int(m.group(1)) == ifindex:
-                return m.group(3).strip()
+        for idx, nm in _parse_netsh_interfaces(out):
+            if idx == ifindex:
+                return nm
     return f"if{ifindex}"
 
 
@@ -137,10 +219,9 @@ def _win_tun_index() -> int | None:
     rc, out, _ = run(["netsh", "interface", "ipv4", "show", "interfaces"],
                      timeout=15)
     if rc == 0:
-        for ln in out.splitlines():
-            m = re.match(r"\s*(\d+)\s+\S+\s+.*?\s{2,}(\S.+)$", ln)
-            if m and m.group(2).strip() == TUN_NAME["win32"]:
-                return int(m.group(1))
+        for idx, nm in _parse_netsh_interfaces(out):
+            if nm == TUN_NAME["win32"]:
+                return idx
     return None
 
 
@@ -154,9 +235,15 @@ def win_up(mtu, upstream_ips, orig=None):
     journal = {"routes": [], "iface": tun, "ip": TUN_IP}
 
     # 1. static address + adapter-scoped DNS on the TUN adapter only
-    rc, _, err = run(["netsh", "interface", "ipv4", "set", "address",
-                      f"name={tun}", "source=static", f"addr={TUN_IP}",
-                      f"mask={TUN_MASK}", "gateway=none"], check=True)
+    #    (one retry - a brand-new wintun adapter is occasionally not ready
+    #    for netsh the very first moment)
+    addr_cmd = ["netsh", "interface", "ipv4", "set", "address",
+                f"name={tun}", "source=static", f"addr={TUN_IP}",
+                f"mask={TUN_MASK}", "gateway=none"]
+    rc, _, err = run(addr_cmd)
+    if rc != 0:
+        time.sleep(1.0)
+        rc, _, err = run(addr_cmd, check=True)
     journal["routes"].append({"type": "addr", "iface": tun})
     rc, _, err = run(["netsh", "interface", "ipv4", "set", "dnsservers",
                       f"name={tun}", "static", f"address={TUN_IP}",
@@ -168,9 +255,14 @@ def win_up(mtu, upstream_ips, orig=None):
         return journal, False, "VPeeN adapter did not appear (tun2socks failed?)"
 
     # 2. anti-loop host routes for the upstream proxy servers via ORIGINAL gw
+    #    (idx may be None on exotic setups - route.exe then resolves the
+    #    interface from the gateway itself)
     for ip in upstream_ips:
-        rc, _, err = run(["route", "add", ip, "mask", "255.255.255.255", gw,
-                          "metric", "1", "if", str(idx)])
+        cmd = ["route", "add", ip, "mask", "255.255.255.255", gw,
+               "metric", "1"]
+        if idx is not None:
+            cmd += ["if", str(idx)]
+        rc, _, err = run(cmd)
         if rc == 0:
             journal["routes"].append({"type": "route", "prefix": ip,
                                       "mask": "255.255.255.255", "gw": gw,

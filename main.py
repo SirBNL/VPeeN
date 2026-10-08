@@ -123,6 +123,15 @@ def _install_run_log() -> None:
 
 def main() -> int:
     _install_run_log()
+    # Tunnel helper modes MUST be handled before the GUI import: the elevated
+    # worker/cleanup processes are spawned as "VPeeN.exe --tunnel-worker ..."
+    # (same frozen binary).  Without this dispatch they opened a SECOND GUI
+    # window instead of running the worker - tunnel mode could never connect
+    # in any packaged release (fixed v4.2.0).
+    argv = sys.argv[1:]
+    if "--tunnel-worker" in argv or "--tunnel-cleanup" in argv:
+        from vpeen.tunnel import main as tunnel_main
+        return tunnel_main(argv)
     try:
         from vpeen.gui import run
     except ImportError as e:

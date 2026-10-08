@@ -115,13 +115,31 @@ class TunnelWorker:
         self.upstream_ips: list[str] = []
         self.dns_enabled = True
         self.mtu = 1500
+        self._tasks: set = set()            # anchored tasks (asyncio keeps
+        self._tun2socks_logf = None        # only weak refs - unanchored
+                                            # tasks can be GC'd mid-flight)
 
     # ------------------------------------------------------------- lifecycle
+    def _spawn(self, coro):
+        """Create a task that the loop cannot garbage-collect silently."""
+        t = asyncio.get_running_loop().create_task(coro)
+        self._tasks.add(t)
+
+        def _reap(task):
+            self._tasks.discard(task)
+            if not task.cancelled():
+                exc = task.exception()
+                if exc is not None:
+                    _flog(f"internal task error: {exc}", "err")
+
+        t.add_done_callback(_reap)
+        return t
+
     async def amain(self):
         server = await asyncio.start_server(self._on_client,
                                             "127.0.0.1", self.ctl_port)
         _flog(f"worker listening on 127.0.0.1:{self.ctl_port}")
-        asyncio.get_event_loop().create_task(self._watchdog())
+        self._spawn(self._watchdog())
         async with server:
             try:
                 await server.serve_forever()
@@ -167,7 +185,7 @@ class TunnelWorker:
 
     def broadcast(self, obj):
         for rd, wr in list(self.clients):
-            asyncio.get_event_loop().create_task(self._send(wr, obj))
+            self._spawn(self._send(wr, obj))
 
     def blog(self, msg, lvl="info"):
         _flog(msg, lvl)
@@ -186,18 +204,42 @@ class TunnelWorker:
             self.mtu = int(cfg.get("mtu", 1500))
             self.upstream_ips = list(cfg.get("upstream_ips", []))
             self.dns_enabled = bool(cfg.get("dns", True))
-            asyncio.get_event_loop().create_task(self._up())
+            self._spawn(self._up())
         elif cmd == "down":
             self.last_ping = time.time()
-            asyncio.get_event_loop().create_task(self._down("requested by app"))
+            self._spawn(self._down("requested by app"))
         elif cmd == "upd":
             self.upstream_ips = list(msg.get("upstream_ips", []))
-            asyncio.get_event_loop().create_task(self._refresh_host_routes())
+            self._spawn(self._refresh_host_routes())
         elif cmd == "quit":
             await self._down("quit command")
             os._exit(0)
 
     # ------------------------------------------------------------------- up
+    def _tun2socks_log_path(self):
+        return os.path.join(plat.CONFIG_DIR, "tun2socks.log")
+
+    def _tun2socks_tail(self, lines=25):
+        """Last lines of the tun2socks log - the ONLY way to see why it
+        failed (its stderr used to go to DEVNULL, making every failure
+        a mystery)."""
+        try:
+            with open(self._tun2socks_log_path(), "rb") as f:
+                data = f.read()
+            return b"\n".join(data.splitlines()[-lines:]).decode(
+                "utf-8", "replace").strip()
+        except Exception:
+            return ""
+
+    def _check_tun2socks_alive(self):
+        """Raise with the log tail if tun2socks died during startup."""
+        if self.tun2socks is not None and self.tun2socks.poll() is not None:
+            tail = self._tun2socks_tail()
+            msg = f"tun2socks exited early (rc={self.tun2socks.returncode})"
+            if tail:
+                msg += f"; last output:\n{tail}"
+            raise OSError(msg)
+
     async def _up(self):
         if self.state == "up":
             await self._down("re-connecting")
@@ -213,7 +255,9 @@ class TunnelWorker:
             if not device:
                 raise OSError("could not plan the TUN device")
 
-            # 1. launch tun2socks (it creates the TUN adapter itself)
+            # 1. launch tun2socks (it creates the TUN adapter itself).
+            #    v4.2.0: its output now goes to tun2socks.log instead of
+            #    DEVNULL so failures are actually diagnosable.
             args = [exe, "--device", device,
                     "--proxy", f"socks5://127.0.0.1:{self.socks_port}",
                     "--mtu", str(self.mtu), "--loglevel", "info"]
@@ -224,18 +268,28 @@ class TunnelWorker:
             flags = 0
             if os.name == "nt":
                 flags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+            try:
+                self._tun2socks_logf = open(self._tun2socks_log_path(), "ab")
+            except Exception:
+                self._tun2socks_logf = None
+            out = self._tun2socks_logf or subprocess.DEVNULL
             self.tun2socks = subprocess.Popen(
                 args, cwd=os.path.dirname(exe), creationflags=flags,
-                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                stdout=out, stderr=out, stdin=subprocess.DEVNULL)
 
-            # 2. wait for the adapter/address, then configure routes
-            await self._wait_address()
+            # 2. wait for the ADAPTER to appear.  v4.2.0 fix: the old code
+            #    waited for the adapter ADDRESS (198.18.0.1) here, but that
+            #    address is only assigned by bring_up() BELOW - so the wait
+            #    timed out every single time and tunnel mode never came up.
+            await self._wait_adapter()
             journal, ok, err = plat.bring_up(self.mtu, self.upstream_ips)
             if journal is None:
                 raise OSError(err or "route setup failed")
             self.journal = journal
             if not ok:
                 self.blog(f"route setup incomplete: {err}", "warn")
+            # sanity: the address should now be present (netsh/ip are sync)
+            await self._verify_address()
 
             # 3. DNS relay bound to the TUN address (through local SOCKS5)
             if self.dns_enabled:
@@ -282,14 +336,51 @@ class TunnelWorker:
             return None
         return None
 
-    async def _wait_address(self, timeout=15):
-        loop = asyncio.get_event_loop()
+    async def _wait_adapter(self, timeout=20):
+        """Wait for the TUN adapter (device) to exist - NOT for its address,
+        which is assigned later by bring_up().  Fails fast if tun2socks
+        dies, including its log tail so the cause is visible."""
+        loop = asyncio.get_running_loop()
+        t0 = time.time()
+        while time.time() - t0 < timeout:
+            self._check_tun2socks_alive()
+            if await loop.run_in_executor(None, self._adapter_present):
+                return
+            await asyncio.sleep(0.4)
+        self._check_tun2socks_alive()
+        name = (plat.TUN_NAME.get("win32") if sys_platform.startswith("win")
+                else plat.TUN_NAME.get("linux" if sys_platform == "linux"
+                                       else "darwin"))
+        raise OSError(f"TUN adapter '{name}' did not appear within {timeout}s "
+                      f"(tun2socks may have failed - see tun2socks.log)")
+
+    def _adapter_present(self):
+        """True once the TUN *device* exists (address may not be set yet)."""
+        try:
+            if sys_platform.startswith("win"):
+                return plat._win_tun_index() is not None
+            if sys_platform == "linux":
+                return os.path.exists(
+                    f"/sys/class/net/{plat.TUN_NAME['linux']}")
+            if sys_platform == "darwin":
+                rc, _, _ = plat.run(["ifconfig", plat.TUN_NAME["darwin"]],
+                                    timeout=10)
+                return rc == 0
+        except Exception:
+            return False
+        return False
+
+    async def _verify_address(self, timeout=8):
+        """Post-bring_up sanity check - warn only (netsh/ip are sync, so a
+        miss here is unusual)."""
+        loop = asyncio.get_running_loop()
         t0 = time.time()
         while time.time() - t0 < timeout:
             if await loop.run_in_executor(None, self._addr_present):
                 return
-            await asyncio.sleep(0.5)
-        raise OSError(f"adapter address {plat.TUN_IP} did not come up")
+            await asyncio.sleep(0.4)
+        self.blog(f"note: address {plat.TUN_IP} not visible yet - "
+                  "continuing anyway", "warn")
 
     def _addr_present(self):
         if sys_platform.startswith("win"):
@@ -306,18 +397,47 @@ class TunnelWorker:
         return False
 
     async def _socks_dial(self, host, port):
-        """Open a TCP connection to host:port through the local SOCKS5."""
+        """Open a TCP connection to host:port through the local SOCKS5.
+        v4.2.0 fix: parse the reply PROPERLY (the old code consumed the
+        2-byte greeting reply + 8 of the 10-byte CONNECT reply, leaving 2
+        stray bytes in the stream - the DNS relay then misread them as a
+        TCP-DNS length prefix and EVERY query failed)."""
         reader, writer = await asyncio.open_connection("127.0.0.1",
                                                        self.socks_port)
-        target = host.encode()
-        writer.write(b"\x05\x01\x00"           # ver 5, 1 method, no-auth
-                     b"\x05\x01\x00\x03" + bytes([len(target)]) + target +
-                     (port).to_bytes(2, "big"))
-        await writer.drain()
-        resp = await reader.readexactly(10)    # 2 greeting + 8 reply (IPv4 bnd)
-        if resp[0] != 5 or resp[1] != 0:
-            raise OSError(f"SOCKS5 dial failed (code {resp[1] if len(resp) > 1 else '?'})")
-        return reader, writer
+        try:
+            target = host.encode()
+            writer.write(b"\x05\x01\x00"           # ver 5, 1 method, no-auth
+                         b"\x05\x01\x00\x03" + bytes([len(target)]) + target +
+                         (port).to_bytes(2, "big"))
+            await writer.drain()
+
+            greet = await asyncio.wait_for(reader.readexactly(2), 10)
+            if greet[0] != 5:
+                raise OSError("bad SOCKS5 greeting reply")
+            if greet[1] != 0:
+                raise OSError(f"SOCKS5 method rejected (code {greet[1]})")
+            rep = await asyncio.wait_for(reader.readexactly(4), 10)
+            if rep[0] != 5:
+                raise OSError("bad SOCKS5 reply")
+            if rep[1] != 0:
+                raise OSError(f"SOCKS5 dial failed (code {rep[1]})")
+            atyp = rep[3]
+            if atyp == 0x01:      # IPv4: BND.ADDR(4) + BND.PORT(2)
+                await reader.readexactly(6)
+            elif atyp == 0x04:    # IPv6: BND.ADDR(16) + BND.PORT(2)
+                await reader.readexactly(18)
+            elif atyp == 0x03:    # domain: LEN(1) + ADDR(n) + PORT(2)
+                n = (await reader.readexactly(1))[0]
+                await reader.readexactly(n + 2)
+            else:
+                raise OSError(f"unexpected SOCKS5 ATYP {atyp}")
+            return reader, writer
+        except Exception:
+            try:
+                writer.close()
+            except Exception:
+                pass
+            raise
 
     async def _refresh_host_routes(self):
         """Server list rotated in the GUI: replace anti-loop host routes."""
@@ -403,6 +523,12 @@ class TunnelWorker:
             except Exception:
                 pass
             self.tun2socks = None
+        if self._tun2socks_logf:
+            try:
+                self._tun2socks_logf.close()
+            except Exception:
+                pass
+            self._tun2socks_logf = None
         if self.journal:
             try:
                 plat.bring_down(self.journal)
@@ -688,6 +814,9 @@ def _worker_main(ctl_port: int, ctl_token: str) -> int:
             asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
         except Exception:
             pass
+    # tunnel_platforms logs via print(); the frozen windowed worker has no
+    # console, so route platform-level logs into the worker log file too
+    plat._log = lambda msg, lvl="info": _flog(msg, lvl)
     worker = TunnelWorker(ctl_port, ctl_token)
     try:
         asyncio.run(worker.amain())

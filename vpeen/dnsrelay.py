@@ -68,7 +68,7 @@ class DNSRelay:
 
     # ------------------------------------------------------------------ api
     async def start(self):
-        udp = await asyncio.get_event_loop().create_datagram_endpoint(
+        udp = await asyncio.get_running_loop().create_datagram_endpoint(
             lambda: _UDPProto(self), local_addr=(self.bind_ip, self.port))
         self._servers.append(udp)
         tcp = await asyncio.start_server(self._tcp_client,
@@ -170,12 +170,29 @@ class _UDPProto(asyncio.DatagramProtocol):
     def __init__(self, relay: DNSRelay):
         self.relay = relay
         self.transport = None
+        self._tasks = set()    # anchor tasks - asyncio only holds weak refs
 
     def connection_made(self, transport):
         self.transport = transport
 
     def datagram_received(self, data, addr):
-        asyncio.get_event_loop().create_task(self._handle(data, addr))
+        try:
+            t = asyncio.get_running_loop().create_task(self._handle(data, addr))
+        except RuntimeError:
+            return
+        self._tasks.add(t)
+
+        def _reap(task, _s=None):
+            self._tasks.discard(task)
+            if not task.cancelled():
+                exc = task.exception()
+                if exc is not None:
+                    try:
+                        self.relay.log(f"dns udp handler error: {exc}", "warn")
+                    except Exception:
+                        pass
+
+        t.add_done_callback(_reap)
 
     async def _handle(self, data, addr):
         if len(data) < 12 or len(data) > 9000:
