@@ -5,6 +5,7 @@ All user-facing strings are Persian to match the tool's audience.
 import argparse
 import asyncio
 import os
+import platform
 import signal
 import sys
 
@@ -127,7 +128,7 @@ async def cmd_test(args):
             dim("Tip: run `python -m vpeen.cli list` to see valid free regions.")
 
 
-def _print_running(online, bind, socks_port, http_port, region, stats):
+def _print_running(bind, socks_port, http_port, region):
     print(f"""
 {C.BOLD}{C.GREEN}  VPN is UP - exit region: {region}{C.RESET}
 
@@ -245,7 +246,7 @@ async def cmd_run(args):
 
     socks_srv = await asyncio.start_server(socks_client_cb, bind, socks_port)
     http_srv = await asyncio.start_server(http_client_cb, bind, http_port)
-    _print_running(first_ip or "checked", bind, socks_port, http_port, region, stats)
+    _print_running(bind, socks_port, http_port, region)
 
     if args.set_system:
         system_on(api.state, bind, http_port, socks_port)
@@ -256,7 +257,6 @@ async def cmd_run(args):
     def _sigint(*_):
         stop.set()
 
-    import platform
     if platform.system() != "Windows":
         for s in (signal.SIGINT, signal.SIGTERM):
             loop.add_signal_handler(s, _sigint)
@@ -273,7 +273,6 @@ async def cmd_run(args):
                     f"down={stats.bytes_down // 1024} KiB"
                     f"{stats.reasons_summary()}")
 
-        rep = None
         rep = asyncio.ensure_future(reporter())
         try:
             await stop.wait()

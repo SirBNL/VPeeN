@@ -570,6 +570,11 @@ class LocalProxyServer:
                         content_length = int(value.strip())
                     except ValueError:
                         pass
+                    # v4.2.3: NEVER forward the client's original
+                    # Content-Length - an exact one is re-encoded below,
+                    # and a duplicate pair makes strict servers (nginx)
+                    # reject the request with 400 Bad Request.
+                    continue
                 if lname == "transfer-encoding" and "chunked" in value.lower():
                     chunked = True
                     continue      # re-encoded with Content-Length below

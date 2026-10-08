@@ -300,6 +300,7 @@ class VPeeNApp(ctk.CTk):
         self.exit_ip = None
         self.pending_tunnel = False
         self.stop_after_tunnel = False
+        self._pending_reconnect = False   # v4.2.3 reconnect after stop
         self._stopping = False
         self._last_error = None         # v4.2.2: keep the error visible
 
@@ -876,8 +877,12 @@ class VPeeNApp(ctk.CTk):
         return TunnelController.is_available()
 
     def _on_connect_toggle(self, auto=False):
-        if self.phase == "connecting":
-            return
+        # v4.2.3: the power button used to be IGNORED while "connecting" -
+        # a stalled connect (slow network, API backoff) left the user
+        # clicking a dead button with no escape but killing the process.
+        # core.stop() now cancels the asyncio task directly (~1s) and the
+        # tunnel watchdogs handle the tunnel side, so the button is a
+        # reliable cancel at every phase.
         if self.phase in ("connected", "connecting"):
             self._disconnect_sequence()
             return
@@ -915,13 +920,39 @@ class VPeeNApp(ctk.CTk):
     def _disconnect_sequence(self, reconnect=False):
         self.stop_after_tunnel = reconnect
         self._stopping = True
+        # v4.2.3: remember that a reconnect was requested - after the core
+        # reports 'disconnected' the connect is re-issued automatically.
+        # (The old flow logged "reconnecting..." but NOTHING re-invoked
+        # the connect: changing the location or the tunnel mode while
+        # connected left the app silently disconnected.)
+        self._pending_reconnect = reconnect
         if self.tunnel.state in ("starting", "up"):
             self._log_line("Disconnecting tunnel...", "info")
             self.tunnel.disconnect()
             self.after(8000, self._tunnel_down_watchdog)
-        else:
+        elif self.core.is_busy():
             self._log_line("Disconnecting...", "info")
             self.core.stop()
+        elif reconnect:
+            # nothing to stop - re-issue the connect right away
+            self._pending_reconnect = False
+            self.after(300, self._reconnect_kick)
+
+    def _reconnect_kick(self, tries=0):
+        """Re-issue the connect once the core thread is really gone."""
+        if not self._pending_reconnect:
+            return
+        try:
+            busy = self.core.is_busy()
+        except Exception:
+            busy = False
+        if busy and tries < 25:
+            self.after(200, lambda: self._reconnect_kick(tries + 1))
+            return
+        self._pending_reconnect = False
+        if self.phase == "disconnected":
+            self._log_line("Reconnecting with the new settings...", "info")
+            self._on_connect_toggle()
 
     def _tunnel_down_watchdog(self):
         # if the tunnel never reported back, force the core stop
@@ -1028,8 +1059,9 @@ class VPeeNApp(ctk.CTk):
     # ---- IP scramble animation
     def _fake_ip(self, locked, target):
         parts = []
+        dotted = bool(target) and target.count(".") == 3   # v4.2.3: IPv6 exits
         for i in range(4):
-            if i < locked and target:
+            if i < locked and dotted:
                 parts.append(target.split(".")[i])
             else:
                 parts.append(str(random.randint(1, 255)))
@@ -1317,6 +1349,10 @@ class VPeeNApp(ctk.CTk):
             if ph == "connected" and self.conn_mode == "tunnel":
                 return      # tunnel event will drive the UI
             self._set_phase(ph, ev.get("region") or ev.get("detail"))
+            if ph == "disconnected" and self._pending_reconnect:
+                # v4.2.3: a location/tunnel-mode change asked for a
+                # reconnect - fire it now that the core has stopped.
+                self.after(300, self._reconnect_kick)
         elif kind == "listeners":
             self._listeners = ev
         elif kind == "exit_ip":

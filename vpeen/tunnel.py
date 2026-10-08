@@ -38,6 +38,7 @@ from . import tunnel_platforms as plat
 ADAPTER_GUID = plat.ADAPTER_GUID
 
 WORKER_HEARTBEAT_TIMEOUT = 12.0     # seconds without PING -> self-teardown
+WORKER_IDLE_EXIT = 60.0            # no GUI client + idle -> exit (v4.2.3)
 CONNECT_TIMEOUT = 40.0              # GUI wait for worker socket
 
 sys_platform = platform.system().lower()
@@ -593,6 +594,14 @@ class TunnelWorker:
                 _flog("GUI heartbeat lost - emergency teardown", "err")
                 await self._down("heartbeat lost")
                 os._exit(0)          # never linger after the GUI is gone
+            # v4.2.3: the GUI can also die BEFORE the tunnel ever came up
+            # (crash during elevation/startup).  An idle worker with no
+            # connected client must not linger forever as an invisible
+            # elevated zombie process holding the control port.
+            if self.state == "idle" and not self.clients and \
+                    time.time() - self.last_ping > WORKER_IDLE_EXIT:
+                _flog("no GUI client connected - idle worker exiting", "warn")
+                os._exit(0)
 
 
 # ============================================================= CONTROLLER

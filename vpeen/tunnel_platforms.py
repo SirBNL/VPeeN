@@ -20,6 +20,7 @@ import platform
 import re
 import shutil
 import subprocess
+import tempfile
 import time
 
 TUN_NAME = {"win32": "VPeeN", "linux": "vpeen0", "darwin": "utun9"}
@@ -73,10 +74,26 @@ def is_admin() -> bool:
 
 # ------------------------------------------------------------------ session
 def save_session(data: dict) -> None:
+    """v4.2.3: ATOMIC write.  The session journal is the crash-recovery
+    keystone - it is written exactly when routes are being mutated, so a
+    crash/power-loss mid-write could truncate it.  load_session() then
+    returned None on the next start, the startup sweep had nothing to
+    replay, and the leftover def1 hijack routes silently sent all traffic
+    into a dead TUN adapter (total network blackout until manual repair)."""
     os.makedirs(CONFIG_DIR, exist_ok=True)
     data["saved_at"] = time.time()
-    with open(SESSION_PATH, "w", encoding="utf-8") as f:
-        json.dump(data, f, indent=1)
+    fd, tmp = tempfile.mkstemp(prefix=".session-", suffix=".tmp",
+                               dir=CONFIG_DIR)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            json.dump(data, f, indent=1)
+        os.replace(tmp, SESSION_PATH)
+    except Exception:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
 
 
 def load_session() -> dict | None:
