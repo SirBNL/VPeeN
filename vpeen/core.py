@@ -12,7 +12,7 @@ import threading
 import time
 
 from .api import VeePNApi
-from .cli import DEFAULT_STATE_PATH
+from .cli import DEFAULT_STATE_PATH, validate_bind_security
 from .localproxy import (LocalProxyServer, Stats, TunnelFactory,
                          install_noise_filter)
 from .systemproxy import system_off, system_on
@@ -127,6 +127,15 @@ class Core:
         set_system_done = False
         try:
             self.log(f"VPeeN core starting - target region: {region or 'optimal'}")
+            # v4.3.0: defense in depth - the GUI and CLI validate the bind
+            # before calling, but the core has the final say.  A non-loopback
+            # bind without credentials would be an open LAN relay.
+            problem = validate_bind_security(bind, None, None)
+            if problem:
+                self.log(problem, "err")
+                self._emit(type="phase", phase=PHASE_ERROR,
+                           detail="unsafe bind address")
+                return
             self._emit(type="phase", phase=PHASE_CONNECTING, detail=region)
             api = VeePNApi(State(self.state_path), insecure_tls=self.insecure)
             if self._stop_evt.is_set():      # stop pressed during startup

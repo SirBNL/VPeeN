@@ -161,6 +161,7 @@ launches as a properly elevated helper and points at its own local SOCKS5.
 | 🧭 **Anti-loop routes** | The VPN servers themselves are pinned to your real gateway, so the tunnel can never route into itself |
 | 🏠 **LAN stays up** | Local network traffic (printers, NAS, router admin) is untouched |
 | 📡 **DNS through the tunnel** | The TUN adapter's DNS points at VPeeN's internal relay — your system DNS settings are never modified |
+| 🛑 **Explicit failure, never silent** (v4.3.0) | If the tunnel drops, you SEE it: a red "TUNNEL FAILED" warning explains that coverage is now partial — or, with the new Settings switch turned off, VPeeN stops instead of quietly downgrading you to proxy mode |
 | 💓 **Heartbeat watchdog** | If the GUI dies, the elevated helper notices within seconds and tears everything down |
 | 🧹 **Crash journal** | Every route change is journaled to disk; after a hard crash the next launch cleans up automatically |
 | ♻️ **Adapter auto-removal** | The wintun adapter lives only as long as the process — kill anything, Windows cleans itself |
@@ -171,10 +172,10 @@ launches as a properly elevated helper and points at its own local SOCKS5.
 
 | | Proxy mode | 🔒 Tunnel mode |
 |---|---|---|
-| Coverage | Apps that use the OS proxy / SOCKS5 | **Every app, every protocol (TCP)** |
+| Coverage | Apps that use the OS proxy / SOCKS5 | **Every app — TCP; DNS is tunneled too. Non-DNS UDP (e.g. QUIC) is not relayed: apps that can, fall back to TCP on their own** |
 | Admin rights | not needed | once per connect (UAC) |
 | DNS | resolved by your system | relayed through the tunnel |
-| Best for | browsers, quick use | full protection, stubborn apps, games |
+| Best for | browsers, quick use | full protection, stubborn apps, TCP-heavy apps |
 
 ## 🏗️ Build from source
 
@@ -236,15 +237,42 @@ The app fetches the live list — run <code>python -m vpeen.cli list</code> to s
 
 <details>
 <summary><b>Is this a "real" VPN?</b></summary>
-With <b>Tunnel mode</b> — yes: a virtual network adapter routes all of your system's TCP traffic
-through the VPN tunnel with DNS leak protection, exactly like Hiddify/sing-box do it.
-In classic proxy mode it is a system-wide SOCKS5/HTTP proxy (no UDP). QUIC/UDP flows fall back
-to TCP automatically in tunnel mode.
+With <b>Tunnel mode</b> — yes for TCP and DNS: a virtual network adapter routes your system's
+TCP traffic through the VPN tunnel with DNS leak protection, exactly like Hiddify/sing-box do it.
+Being honest about the limits: the upstream is an HTTPS-CONNECT (TCP-only) proxy, so <b>non-DNS
+UDP (QUIC, VoIP, games) is not relayed</b> — QUIC-capable apps fall back to TCP on their own,
+others need TCP. In classic proxy mode it is a system-wide SOCKS5/HTTP proxy with the same limits.
+Since v4.3.0 the local SOCKS5 also answers <b>UDP ASSOCIATE for DNS</b> (relayed as DNS-over-TCP
+through the tunnel), which keeps tun2socks-based setups working.
 </details>
 
 <details>
 <summary><b>Where is my data stored?</b></summary>
-Only <code>~/.vpeen/</code> on your machine — cached token, servers and settings. Nothing is sent anywhere else.
+Only <code>~/.vpeen/</code> on your machine — cached token, servers and settings. Nothing is sent
+anywhere else. The state file (which contains the access token) is written with <code>0600</code>
+permissions and the directory with <code>0700</code> (POSIX), so only your user can read it.
+</details>
+
+<details>
+<summary><b>What changed in v4.3.0 (security pass)?</b></summary>
+<ul>
+<li><b>Local proxy auth</b> — the CLI (<code>python -m vpeen.cli run</code>) accepts
+<code>--proxy-user/--proxy-pass</code>: RFC 1929 for SOCKS5, Basic for HTTP.</li>
+<li><b>Bind safety</b> — a non-loopback bind without credentials is refused outright; the GUI is
+loopback-only and its Bind field is now actually applied (it used to be stored but ignored).</li>
+<li><b>Explicit TUN failure</b> — no more silent fallback to proxy mode: loud warning, or full stop
+if you disable the new "On TUN failure, fall back to proxy" switch in Settings.</li>
+<li><b>UDP ASSOCIATE (DNS)</b> — DNS datagrams are relayed through the tunnel; other UDP is dropped
+deliberately (the upstream is TCP-only).</li>
+<li><b>Secrets hygiene</b> — <code>export</code> masks the upstream password unless
+<code>--show-secrets</code>; state files are 0600/0700.</li>
+<li><b>API hardening</b> — reserve API domains must be HTTPS with a sane hostname before the Bearer
+token is ever sent there, every domain in the rotation is actually tried (a fixed attempt count
+used to make the last default domain and all reserve domains unreachable), and one request can
+never stall past a 120s wall-clock budget.</li>
+<li><b>macOS restore fidelity</b> — the pre-existing per-service proxy (enabled, host, port) is
+backed up and restored exactly, instead of blindly switching proxies off.</li>
+</ul>
 </details>
 
 <details>

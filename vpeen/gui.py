@@ -17,6 +17,7 @@ from PIL import Image, ImageDraw, ImageTk
 
 from . import __app_name__, __version__
 from . import settings as cfgmod
+from .cli import validate_bind_security
 from .core import Core, PHASE_CONNECTING, spawn_quick_task
 
 # ------------------------------------------------------------------ palette
@@ -910,7 +911,16 @@ class VPeeNApp(ctk.CTk):
         # users had to set it by hand every time.
         set_system = bool(self.cfg.get("auto_system_proxy", False)) \
             and not want_tunnel      # tunnel mode routes everything itself
-        self.core.start(region, "127.0.0.1", socks_port, http_port, set_system)
+        # v4.3.0: the bind address is now REAL (it used to be stored but
+        # silently ignored).  The GUI is loopback-only: a non-loopback bind
+        # would need proxy auth, which the CLI offers via
+        # --proxy-user/--proxy-pass.
+        bind = (self.cfg.get("bind") or "127.0.0.1").strip() or "127.0.0.1"
+        problem = validate_bind_security(bind, None, None)
+        if problem:
+            self._log_line(problem, "err")
+            return
+        self.core.start(region, bind, socks_port, http_port, set_system)
         self._set_phase("connecting")
 
     def _reconnect(self):
@@ -1174,8 +1184,8 @@ class VPeeNApp(ctk.CTk):
             return c
 
         c1 = card(64, 168, "LOCAL PROXY")
-        ctk.CTkLabel(c1, text="Bind address", text_color=INK, font=F(13),
-                     fg_color="transparent").place(x=20, y=46)
+        ctk.CTkLabel(c1, text="Bind address (loopback only)", text_color=INK,
+                     font=F(13), fg_color="transparent").place(x=20, y=46)
         self.e_bind = ctk.CTkEntry(c1, width=170, height=34, corner_radius=9,
                                    fg_color=CARD_LIGHT, border_width=0,
                                    text_color=INK)
@@ -1219,6 +1229,15 @@ class VPeeNApp(ctk.CTk):
                                     self.cfg.get("auto_system_proxy"), 44)
         self.sw_autoconn = self._sw(c3, "Auto-connect on launch",
                                     self.cfg.get("auto_connect"), 84)
+        # v4.3.0: TUN-failure behaviour is explicit and configurable -
+        # see _tun_failed_fallback()
+        self.sw_tunfall = ctk.CTkSwitch(
+            c3, text="On TUN failure, fall back to proxy",
+            progress_color=ACCENT, button_color=WHITE, fg_color="#dfe6f2",
+            text_color=INK, font=F(13))
+        if self.cfg.get("tun_fallback", True):
+            self.sw_tunfall.select()
+        self.sw_tunfall.place(x=344, y=44)
 
         ctk.CTkButton(view, text="Save settings", height=38, width=680,
                       corner_radius=10, fg_color=MAIN_TOP,
@@ -1255,8 +1274,17 @@ class VPeeNApp(ctk.CTk):
         except ValueError:
             self._log_line("Invalid values - settings not saved.", "err")
             return
+        # v4.3.0: the bind address is validated for real (it used to be a
+        # dead setting).  The GUI is loopback-only - an open LAN proxy needs
+        # credentials, which the CLI (--proxy-user/--proxy-pass) provides.
+        bind = self.e_bind.get().strip() or "127.0.0.1"
+        problem = validate_bind_security(bind, None, None)
+        if problem:
+            self._log_line("Bind address rejected - settings not saved.", "err")
+            self._log_line(problem, "err")
+            return
         self.cfg.update({
-            "bind": self.e_bind.get().strip() or "127.0.0.1",
+            "bind": bind,
             "socks_port": socks_port,
             "http_port": http_port,
             "tunnel_dns": bool(self.sw_tdns.get()),
@@ -1264,12 +1292,39 @@ class VPeeNApp(ctk.CTk):
             "tunnel_mtu": mtu,
             "auto_system_proxy": bool(self.sw_auto_sys.get()),
             "auto_connect": bool(self.sw_autoconn.get()),
+            "tun_fallback": bool(self.sw_tunfall.get()),
         })
         cfgmod.save(self.cfg)
         self.strip_info.configure(text=self._strip_text())
         self._log_line("Settings saved.", "ok")
 
     # ====================================================== tunnel orchestration
+    def _tun_failed_fallback(self, why: str):
+        """v4.3.0: TUN failure is now EXPLICIT - never a silent downgrade.
+
+        * tun_fallback ON (default): land in proxy mode with a loud red
+          warning that coverage is now PARTIAL (only proxy-aware apps are
+          protected; the rest of the traffic goes direct).
+        * tun_fallback OFF: stop everything instead of returning traffic to
+          a direct path - the disconnect screen keeps the reason visible
+          and the user reconnects manually (kill-switch-minded behaviour).
+        """
+        self._last_error = why
+        if self.cfg.get("tun_fallback", True):
+            self.conn_mode = "proxy"
+            self.strip_info.configure(text=self._strip_text())
+            self._log_line(f"TUNNEL FAILED ({why}) - switched to PROXY mode.",
+                           "err")
+            self._log_line("Coverage is now PARTIAL: only apps that use the "
+                           "proxy are protected. Re-connect tunnel mode or "
+                           "disconnect when done.", "err")
+            self._set_phase("connected", self._region_label())
+        else:
+            self._log_line(f"TUNNEL FAILED ({why}) - protection STOPPED "
+                           "(fallback disabled; traffic will not fall back "
+                           "to direct silently).", "err")
+            self._disconnect_sequence()
+
     def _tunnel_event(self, ev):
         phase = ev.get("phase")
         if phase == "up":
@@ -1286,28 +1341,20 @@ class VPeeNApp(ctk.CTk):
                 self._stopping = False
                 self.core.stop()
             elif self.phase == "connected":
-                # tunnel dropped unexpectedly - fall back to proxy mode
-                self.conn_mode = "proxy"
-                self.strip_info.configure(text=self._strip_text())
-                self._log_line("Fell back to proxy mode.", "warn")
+                # tunnel dropped unexpectedly - explicit fallback (v4.3.0)
+                self._tun_failed_fallback("the VPN tunnel dropped")
             elif self.phase == "connecting":
                 # v4.2.2: the tunnel died while connecting (helper lost,
                 # worker error without an explicit error event) - the proxy
-                # listeners ARE up at this point, so land in proxy mode
-                # instead of spinning in "Connecting..." forever.
-                self.conn_mode = "proxy"
-                self._log_line("Tunnel did not come up - continuing in "
-                               "proxy mode.", "warn")
-                self._set_phase("connected", self._region_label())
+                # listeners ARE up at this point.
+                self._tun_failed_fallback("the tunnel did not come up")
         elif phase == "error":
             if self.phase == "connecting":
-                # v4.2.2: ALWAYS fall back here.  The old code required
-                # exit_ip to be known; when the upstream check had failed the
-                # UI stayed stuck in "Connecting..." forever.
-                self._log_line(f"Tunnel failed ({ev.get('detail')}) - "
-                               f"staying in proxy mode.", "err")
-                self.conn_mode = "proxy"
-                self._set_phase("connected", self._region_label())
+                # v4.2.2: ALWAYS handle this.  The old code required exit_ip
+                # to be known; when the upstream check had failed the UI
+                # stayed stuck in "Connecting..." forever.
+                self._tun_failed_fallback(
+                    f"tunnel setup failed ({ev.get('detail')})")
             else:
                 self._log_line(f"Tunnel error: {ev.get('detail')}", "err")
 
@@ -1396,10 +1443,9 @@ class VPeeNApp(ctk.CTk):
 
     def _tunnel_up_watchdog(self):
         if self.phase == "connecting" and self.tunnel.state != "up":
-            self._log_line("Tunnel not confirmed - continuing in proxy mode.",
-                           "warn")
-            self.conn_mode = "proxy"
-            self._set_phase("connected", self._region_label())
+            # v4.3.0: explicit - the fallback either lands in (loudly
+            # labelled) proxy mode or stops everything, per the setting.
+            self._tun_failed_fallback("tunnel not confirmed within 45s")
 
     def _fill_locations(self, ev):
         data = ev.get("data")

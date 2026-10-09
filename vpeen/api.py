@@ -24,6 +24,7 @@ import json
 import random
 import re
 import ssl
+import time
 import urllib.request
 import urllib.error
 import uuid
@@ -55,6 +56,94 @@ RESERVE_BUCKET_URLS = [
 SERVERS_CACHE_TTL_MS = 12 * 3600 * 1000     # 12 h
 TOKEN_SOFT_TTL_MS = 7 * 24 * 3600 * 1000    # refresh token after 7 days
 
+# v4.3.0 security/robustness hardening for the domain-rotation layer:
+# * every domain in the rotation is tried (the old fixed attempt counts of
+#   6/7 gave the 7 default domains a turn but the reserve domains fetched
+#   from the public buckets were NEVER reached - they existed only on paper);
+# * reserve domains are validated strictly (HTTPS + sane hostname) before
+#   they are ever appended, because the Bearer token is sent to every
+#   domain in this list;
+# * one request can never stall longer than REQUEST_BUDGET_SECONDS.
+MAX_DOMAIN_ATTEMPTS = 14        # 7 defaults + up to 7 reserve domains
+MAX_RESERVE_DOMAINS = 10
+REQUEST_BUDGET_SECONDS = 120
+API_TIMEOUT = 12                # per-HTTP-attempt socket timeout (was 20)
+
+_API_DOMAIN_RE = re.compile(
+    r"^https://(?:[A-Za-z0-9](?:[A-Za-z0-9-]*[A-Za-z0-9])?\.)+"
+    r"[A-Za-z0-9](?:[A-Za-z0-9-]*[A-Za-z0-9])?(?::\d{1,5})?$")
+
+
+def valid_api_domain(url) -> bool:
+    """Strict validation for an API base domain.
+
+    v4.3.0: the reserve-domain buckets are public JSON files; the old check
+    (isinstance str + startswith("http")) accepted http:// and any junk a
+    hostile/compromised bucket served, and the Bearer token is sent in the
+    Authorization header of every request that follows.  Now a domain must
+    be https:// with a sane hostname (letters/digits/dots/hyphens, optional
+    port).  TLS certificate verification is still enforced by _ssl_context,
+    so an HTTPS domain we do not trust would fail the handshake rather than
+    leak the token."""
+    if not isinstance(url, str):
+        return False
+    u = url.strip().rstrip("/")
+    if not _API_DOMAIN_RE.match(u):
+        return False
+    # a port, when present, must be a real TCP port
+    rest = u[len("https://"):]
+    if ":" in rest:
+        try:
+            if not (0 < int(rest.rsplit(":", 1)[1]) < 65536):
+                return False
+        except ValueError:
+            return False
+    return True
+
+# v4.3.0 security/robustness hardening for the domain-rotation layer:
+# * every domain in the rotation is tried (the old fixed attempt counts of
+#   6/7 gave the 7 default domains a turn but the reserve domains fetched
+#   from the public buckets were NEVER reached - they existed only on paper);
+# * reserve domains are validated strictly (HTTPS + sane hostname) before
+#   they are ever appended, because the Bearer token is sent to every
+#   domain in this list;
+# * one request can never stall longer than REQUEST_BUDGET_SECONDS.
+MAX_DOMAIN_ATTEMPTS = 14        # 7 defaults + up to 7 reserve domains
+MAX_RESERVE_DOMAINS = 10
+REQUEST_BUDGET_SECONDS = 120
+API_TIMEOUT = 12                # per-HTTP-attempt socket timeout (was 20)
+
+_API_DOMAIN_RE = re.compile(
+    r"^https://(?:[A-Za-z0-9](?:[A-Za-z0-9-]*[A-Za-z0-9])?\.)+"
+    r"[A-Za-z0-9](?:[A-Za-z0-9-]*[A-Za-z0-9])?(?::\d{1,5})?$")
+
+
+def valid_api_domain(url) -> bool:
+    """Strict validation for an API base domain.
+
+    v4.3.0: the reserve-domain buckets are public JSON files; the old check
+    (isinstance str + startswith("http")) accepted http:// and any junk a
+    hostile/compromised bucket served, and the Bearer token is sent in the
+    Authorization header of every request that follows.  Now a domain must
+    be https:// with a sane hostname (letters/digits/dots/hyphens, optional
+    port).  TLS certificate verification is still enforced by _ssl_context,
+    so an HTTPS domain we do not trust would fail the handshake rather than
+    leak the token."""
+    if not isinstance(url, str):
+        return False
+    u = url.strip().rstrip("/")
+    if not _API_DOMAIN_RE.match(u):
+        return False
+    # a port, when present, must be a real TCP port
+    rest = u[len("https://"):]
+    if ":" in rest:
+        try:
+            if not (0 < int(rest.rsplit(":", 1)[1]) < 65536):
+                return False
+        except ValueError:
+            return False
+    return True
+
 # Per-attempt domain-rotation backoff.  v1.2.4: the old schedule
 # ([2,5,12,25,45] x 7 attempts) could stall a single API call for almost
 # three minutes before surfacing an error - the single biggest "it just
@@ -70,7 +159,7 @@ IP_ECHO_MIRRORS = [
 ]
 
 
-def _http_request(url, method="GET", headers=None, body=None, timeout=20):
+def _http_request(url, method="GET", headers=None, body=None, timeout=API_TIMEOUT):
     """Blocking HTTP request returning (status, parsed_json_or_text)."""
     req_headers = {
         "Accept": "application/json",
@@ -99,7 +188,8 @@ def _http_request(url, method="GET", headers=None, body=None, timeout=20):
     return status, parsed
 
 
-async def _http_request_async(url, method="GET", headers=None, body=None, timeout=20):
+async def _http_request_async(url, method="GET", headers=None, body=None,
+                              timeout=API_TIMEOUT):
     return await asyncio.to_thread(
         _http_request, url, method, headers, body, timeout
     )
@@ -143,12 +233,23 @@ class VeePNApi:
         401 forever (the soft TTL is 7 days and nothing invalidated it),
         killing server_list until the user deleted the state file by hand.
         Now a 401/403 on an authed request invalidates the cached token,
-        fetches a fresh one and retries the request once."""
-        attempts = attempts if attempts is not None else len(BACKOFF_SECONDS) + 1
+        fetches a fresh one and retries the request once.
+
+        v4.3.0: the default attempt count is now "every domain in the
+        rotation" (capped) instead of a fixed 6 - the 7th default domain and
+        every reserve domain used to be unreachable from this code path no
+        matter how long the list was.  A wall-clock budget bounds the total
+        stall so a fully-dead network still surfaces an error promptly."""
         domains = await self.get_domains()
+        if attempts is None:
+            attempts = min(len(domains), MAX_DOMAIN_ATTEMPTS)
+        deadline = time.monotonic() + REQUEST_BUDGET_SECONDS
         last_error = "unknown"
         token_refreshed = False
         for attempt in range(attempts):
+            if attempt and time.monotonic() > deadline:
+                last_error += " (request budget exhausted)"
+                break
             headers = {}
             if auth:
                 token = await self.ensure_token(force=token_refreshed)
@@ -205,8 +306,13 @@ class VeePNApi:
                                {"free": extra, "fetched_at": now})
             elif cached and cached.get("free"):
                 extra = cached.get("free")   # stale but better than none
+        # v4.3.0: validate EVERYTHING that ends up in the rotation (the
+        # defaults are static, but a poisoned state.json or bucket payload
+        # must never put an http:// or garbage base URL on the list the
+        # Bearer token is sent to).
         for d in extra:
-            if d not in domains:
+            d = d.strip().rstrip("/")
+            if valid_api_domain(d) and d not in domains:
                 domains.append(d)
         self._domains = domains
         return domains
@@ -219,21 +325,24 @@ class VeePNApi:
                 if status == 200 and isinstance(payload, dict):
                     d = payload.get("domains") or {}
                     for url in (d.get("free") or []):
-                        if isinstance(url, str) and url.startswith("http"):
+                        if valid_api_domain(url):
                             found.append(url)
-                    # v1.2.4: only ever accept plain strings here.  The old
+                    # v4.2.2: only ever accept plain strings here.  The old
                     # code appended whatever `payload["free"]` was - a list
                     # or dict would later crash get_domains() consumers
                     # (domain.rstrip on a non-str).
+                    # v4.3.0: startswith("http") is no longer enough - the
+                    # strict validator rejects http:// and malformed hosts.
                     extra = payload.get("free")
-                    if isinstance(extra, str) and extra.startswith("http"):
+                    if isinstance(extra, str) and valid_api_domain(extra):
                         found.append(extra)
                     elif isinstance(extra, list):
-                        found.extend(u for u in extra
-                                     if isinstance(u, str) and u.startswith("http"))
+                        found.extend(u for u in extra if valid_api_domain(u))
             except Exception:
                 continue
-        return found
+        # cap the list: a hostile bucket must not be able to stretch the
+        # rotation (and the request budget) arbitrarily
+        return found[:MAX_RESERVE_DOMAINS]
 
     # ------------------------------------------------------------------ token
     async def ensure_token(self, force: bool = False) -> str:
@@ -253,9 +362,15 @@ class VeePNApi:
             "deviceName": DEVICE_NAME,
         }
         # launch is not authenticated; do it manually to avoid recursion
+        # v4.3.0: rotate across every domain (capped) + wall-clock budget,
+        # same fix as _request - the fixed 7-attempt loop never reached the
+        # reserve domains.
         domains = await self.get_domains()
         last = None
-        for attempt in range(len(BACKOFF_SECONDS) + 2):
+        deadline = time.monotonic() + REQUEST_BUDGET_SECONDS
+        for attempt in range(min(len(domains), MAX_DOMAIN_ATTEMPTS)):
+            if attempt and time.monotonic() > deadline:
+                break
             domain = domains[attempt % len(domains)]
             url = domain.rstrip("/") + "/v3/launch/"
             try:

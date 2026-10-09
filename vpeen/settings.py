@@ -11,6 +11,9 @@ DEFAULTS = {
     "socks_port": 1080,
     "http_port": 8080,
     "auto_system_proxy": False,
+    "tun_fallback": True,          # v4.3.0: on TUN failure, land in proxy
+                                   # mode (loudly) instead of stopping; turn
+                                   # OFF for kill-switch-style behaviour
     "theme": "Dark",
     "last_region": "",
     "auto_connect": False,

@@ -90,7 +90,13 @@ class State:
     v4.2.2: the whole State object is now guarded by a re-entrant lock.
     The atomic write alone protected the FILE, not the dump: json.dump
     iterating self.data while another thread's set() inserted a key raised
-    "dictionary changed size during iteration" and that write was lost."""
+    "dictionary changed size during iteration" and that write was lost.
+
+    v4.3.0: the file holds a live access token and proxy credentials, so
+    permissions are now explicit instead of accidental - the state file is
+    written 0600 and a freshly created state directory is 0700 (POSIX).
+    (mkstemp already produced 0600 by luck; this makes it a guarantee that
+    survives refactors, and locks the directory down too.)"""
 
     def __init__(self, path):
         self.path = path
@@ -110,10 +116,21 @@ class State:
             try:
                 d = os.path.dirname(self.path)
                 if d:
+                    created = not os.path.isdir(d)
                     os.makedirs(d, exist_ok=True)
+                    if created and os.name != "nt":
+                        try:
+                            os.chmod(d, 0o700)     # private state directory
+                        except Exception:
+                            pass
                 fd, tmp = tempfile.mkstemp(prefix=".state-", suffix=".tmp",
                                            dir=d or ".")
                 try:
+                    if os.name != "nt":
+                        try:
+                            os.fchmod(fd, 0o600)   # token/creds stay private
+                        except Exception:
+                            pass
                     with os.fdopen(fd, "w", encoding="utf-8") as f:
                         json.dump(self.data, f, ensure_ascii=False, indent=2)
                     os.replace(tmp, self.path)

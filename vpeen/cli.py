@@ -4,6 +4,7 @@ All user-facing strings are Persian to match the tool's audience.
 """
 import argparse
 import asyncio
+import ipaddress
 import os
 import platform
 import signal
@@ -32,6 +33,29 @@ def _make_api(args) -> VeePNApi:
     return VeePNApi(State(_state_path(args)), insecure_tls=getattr(args, "insecure", False))
 
 
+def validate_bind_security(bind: str, user, pwd) -> str | None:
+    """v4.3.0: refuse to expose an unauthenticated proxy to the network.
+
+    Returns None when the bind is safe, otherwise a human-readable error.
+    Loopback binds (127.0.0.1 / ::1 / localhost) are always fine.  Anything
+    else (0.0.0.0, a LAN IP, a hostname) makes the proxy reachable from
+    other devices - that is only allowed with proxy credentials set, so the
+    neighbours cannot spend your VeePN quota or ride your traffic."""
+    bind = (bind or "127.0.0.1").strip()
+    try:
+        if ipaddress.ip_address(bind).is_loopback:
+            return None
+    except ValueError:
+        if bind.lower() in ("localhost", "::1"):
+            return None
+    if not (user and pwd):
+        return (f"refusing to bind to '{bind}': the local proxy would be "
+                f"reachable from your network WITHOUT a password.  "
+                f"Set the proxy auth fields in Settings, or use the "
+                f"default 127.0.0.1.")
+    return None
+
+
 def _interactive_args() -> argparse.Namespace:
     """Complete default namespace so every cmd_* works from the menu
     (subcommand flags like --bind / --count do not exist there)."""
@@ -41,6 +65,8 @@ def _interactive_args() -> argparse.Namespace:
         best=False, bind="127.0.0.1",
         socks_port=DEFAULT_SOCKS_PORT, http_port=DEFAULT_HTTP_PORT,
         set_system=False,
+        proxy_user=None, proxy_pass=None,
+        show_secrets=False,
     )
 
 
@@ -128,7 +154,9 @@ async def cmd_test(args):
             dim("Tip: run `python -m vpeen.cli list` to see valid free regions.")
 
 
-def _print_running(bind, socks_port, http_port, region):
+def _print_running(bind, socks_port, http_port, region, auth=None):
+    auth_line = (f"  Auth     : {C.CYAN}username/password required"
+                 f"{C.RESET}\n") if auth else ""
     print(f"""
 {C.BOLD}{C.GREEN}  VPN is UP - exit region: {region}{C.RESET}
 
@@ -136,7 +164,7 @@ def _print_running(bind, socks_port, http_port, region):
   ──────────────────────────────────────────────────
   SOCKS5 : {C.CYAN}socks5://{bind}:{socks_port}{C.RESET}
   HTTP   : {C.CYAN}http://{bind}:{http_port}{C.RESET}
-
+{auth_line}
   Quick set (system-wide if not auto-set)
   ──────────────────────────────────────────────────
   Windows      -> Settings > Proxy > {bind}:{http_port}
@@ -216,9 +244,18 @@ async def cmd_run(args):
 
     bind = args.bind
     socks_port, http_port = args.socks_port, args.http_port
+    # v4.3.0: an unauthenticated non-loopback bind is refused outright
+    user = getattr(args, "proxy_user", None)
+    pwd = getattr(args, "proxy_pass", None)
+    problem = validate_bind_security(bind, user, pwd)
+    if problem:
+        err(problem)
+        return 1
+    auth = (user, pwd) if (user and pwd) else None
     stats = Stats()
-    factory = TunnelFactory(api, servers, insecure_tls=getattr(args, "insecure", False))
-    proxy = LocalProxyServer(factory, stats)
+    factory = TunnelFactory(api, servers, insecure_tls=getattr(args, "insecure", False),
+                            on_refresh=None)
+    proxy = LocalProxyServer(factory, stats, auth=auth)
 
     # --- explicit client-task registry: every handler task is tracked so we
     # can cancel and REAP it on shutdown (prevents "Task was destroyed but
@@ -246,7 +283,10 @@ async def cmd_run(args):
 
     socks_srv = await asyncio.start_server(socks_client_cb, bind, socks_port)
     http_srv = await asyncio.start_server(http_client_cb, bind, http_port)
-    _print_running(bind, socks_port, http_port, region)
+    _print_running(bind, socks_port, http_port, region, auth=auth)
+    if auth:
+        info("Proxy authentication is ON - clients must supply the "
+             "configured user/password.")
 
     if args.set_system:
         system_on(api.state, bind, http_port, socks_port)
@@ -268,9 +308,11 @@ async def cmd_run(args):
         async def reporter():
             while True:
                 await asyncio.sleep(30)
+                extra = (f" dns_udp={stats.udp_dns}"
+                         if stats.udp_dns else "")
                 dim(f"  [stats] conns={stats.connections} active={stats.active} "
                     f"failed={stats.failed} up={stats.bytes_up // 1024} KiB "
-                    f"down={stats.bytes_down // 1024} KiB"
+                    f"down={stats.bytes_down // 1024} KiB{extra}"
                     f"{stats.reasons_summary()}")
 
         rep = asyncio.ensure_future(reporter())
@@ -321,7 +363,11 @@ async def cmd_run(args):
 
 
 async def cmd_export(args):
-    """Print ready-to-use proxy configs for the chosen region."""
+    """Print ready-to-use proxy configs for the chosen region.
+
+    v4.3.0: the upstream password is MASKED by default - the old output
+    printed live credentials in cleartext, which is dangerously easy to
+    paste into a chat or a public issue.  Pass --show-secrets to reveal."""
     api = _make_api(args)
     region = args.region or "nl"
     servers = await api.server_list(region)
@@ -331,15 +377,23 @@ async def cmd_export(args):
     s = servers[0]
     host, port = s["addresses"][0], s["port"]
     user, pwd = s["username"], s["password"]
+    if getattr(args, "show_secrets", False):
+        warn("Output below contains LIVE proxy credentials - "
+             "do not paste it into public places.")
+        pwd_show = pwd
+    else:
+        pwd_show = "*" * max(8, min(len(pwd), 12)) + \
+            "   (masked - pass --show-secrets to reveal)"
     print(f"\n{C.BOLD}Upstream (VeePN HTTPS proxy) - region {region}{C.RESET}")
     print(f"  host={host}  port={port}")
     print(f"  user={user}")
-    print(f"  pass={pwd}")
+    print(f"  pass={pwd_show}")
     print(f"\n{C.BOLD}curl examples{C.RESET}")
-    print(f'  curl -x "https://{user}:{pwd}@{host}:{port}" https://api.ipify.org')
+    print(f'  curl -x "https://{user}:{pwd_show}@{host}:{port}" '
+          f"https://api.ipify.org")
     print(f"\n{C.BOLD}Programmatic{C.RESET}")
-    print(f'  requests: proxies={{"https": "https://{user}:{pwd}@{host}:{port}", '
-          f'"http": "https://{user}:{pwd}@{host}:{port}"}}')
+    print(f'  requests: proxies={{"https": "https://{user}:{pwd_show}@{host}:{port}", '
+          f'"http": "https://{user}:{pwd_show}@{host}:{port}"}}')
     print()
 
 
@@ -412,11 +466,19 @@ def build_parser():
     rp.add_argument("--bind", default="127.0.0.1")
     rp.add_argument("--socks-port", type=int, default=DEFAULT_SOCKS_PORT)
     rp.add_argument("--http-port", type=int, default=DEFAULT_HTTP_PORT)
+    rp.add_argument("--proxy-user", default=None,
+                    help="require user/pass auth on the local proxy "
+                         "(mandatory when binding to a non-loopback address)")
+    rp.add_argument("--proxy-pass", default=None,
+                    help="password for --proxy-user")
     rp.add_argument("--set-system", action="store_true",
                     help="auto-set system proxy (restored on exit)")
 
     ep = sub.add_parser("export", help="print upstream proxy config")
     ep.add_argument("region", nargs="?", default="nl")
+    ep.add_argument("--show-secrets", action="store_true",
+                    help="print the upstream password in cleartext "
+                         "(masked by default)")
 
     return p
 
