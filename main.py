@@ -20,8 +20,11 @@ def _install_run_log() -> None:
     failure inside here is swallowed.
     """
     try:
+        from vpeen.utils import ensure_private_dir
         path = os.path.join(os.path.expanduser("~"), ".vpeen", "last-run.log")
-        os.makedirs(os.path.dirname(path), exist_ok=True)
+        # v4.3.0: the log dir must be private too - this bare makedirs was
+        # the FIRST creator of ~/.vpeen, before State/settings could chmod
+        ensure_private_dir(os.path.dirname(path))
         f = open(path, "w", encoding="utf-8", errors="replace", buffering=1)
     except Exception:
         return
