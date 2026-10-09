@@ -116,13 +116,7 @@ class State:
             try:
                 d = os.path.dirname(self.path)
                 if d:
-                    created = not os.path.isdir(d)
-                    os.makedirs(d, exist_ok=True)
-                    if created and os.name != "nt":
-                        try:
-                            os.chmod(d, 0o700)     # private state directory
-                        except Exception:
-                            pass
+                    ensure_private_dir(d)     # private state directory
                 fd, tmp = tempfile.mkstemp(prefix=".state-", suffix=".tmp",
                                            dir=d or ".")
                 try:
@@ -187,3 +181,25 @@ def local_timezone_name() -> str:
 
 def now_ms() -> int:
     return int(time.time() * 1000)
+
+
+def ensure_private_dir(path: str) -> None:
+    """v1.3.0/v4.3.0: create `path` (with parents) as 0700 on POSIX.
+
+    Every directory that will hold sensitive files (state.json with the
+    access token, tunnel journals, worker logs) must go through this
+    instead of a bare os.makedirs, so the permissions stay tight no matter
+    WHICH module creates the directory first (the state file itself is
+    already written 0600 by State.save)."""
+    if not path:
+        return
+    try:
+        created = not os.path.isdir(path)
+        os.makedirs(path, exist_ok=True)
+        if created and os.name != "nt":
+            try:
+                os.chmod(path, 0o700)
+            except Exception:
+                pass
+    except Exception:
+        pass

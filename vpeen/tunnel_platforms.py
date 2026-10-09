@@ -80,7 +80,7 @@ def save_session(data: dict) -> None:
     returned None on the next start, the startup sweep had nothing to
     replay, and the leftover def1 hijack routes silently sent all traffic
     into a dead TUN adapter (total network blackout until manual repair)."""
-    os.makedirs(CONFIG_DIR, exist_ok=True)
+    ensure_private_dir(CONFIG_DIR)
     data["saved_at"] = time.time()
     fd, tmp = tempfile.mkstemp(prefix=".session-", suffix=".tmp",
                                dir=CONFIG_DIR)
@@ -340,7 +340,7 @@ def _linux_dns_swap():
     try:
         with open(real, "r", encoding="utf-8") as f:
             old = f.read()
-        os.makedirs(CONFIG_DIR, exist_ok=True)
+        ensure_private_dir(CONFIG_DIR)
         with open(RESOLV_BAK, "w", encoding="utf-8") as f:
             f.write(old)
         with open(real, "w", encoding="utf-8") as f:

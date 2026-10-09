@@ -30,6 +30,8 @@ import secrets
 import socket
 import subprocess
 import sys
+
+from .utils import ensure_private_dir
 import threading
 import time
 
@@ -47,7 +49,7 @@ sys_platform = platform.system().lower()
 # ------------------------------------------------------------------ helpers
 def _log_file():
     d = plat.CONFIG_DIR
-    os.makedirs(d, exist_ok=True)
+    ensure_private_dir(d)
     return os.path.join(d, "tunnel-worker.log")
 
 

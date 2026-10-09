@@ -3,6 +3,8 @@ import json
 import os
 import tempfile
 
+from .utils import ensure_private_dir
+
 CONFIG_DIR = os.path.join(os.path.expanduser("~"), ".vpeen")
 CONFIG_PATH = os.path.join(CONFIG_DIR, "settings.json")
 
@@ -45,7 +47,7 @@ def save(cfg: dict) -> None:
     writers mid-dump used to be able to leave a truncated settings.json,
     silently resetting every setting to defaults on next launch."""
     try:
-        os.makedirs(CONFIG_DIR, exist_ok=True)
+        ensure_private_dir(CONFIG_DIR)   # keep ~/.vpeen private
         data = {k: cfg.get(k, DEFAULTS[k]) for k in DEFAULTS}
         fd, tmp = tempfile.mkstemp(prefix=".settings-", suffix=".tmp",
                                    dir=CONFIG_DIR)
