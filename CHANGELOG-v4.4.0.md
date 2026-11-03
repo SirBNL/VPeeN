@@ -118,7 +118,10 @@ plus a real-network connect check).
 * `requirements.txt` now contains only the optional `pywebview`
   (non-Linux) — the core needs nothing.
 * Demo mode data includes countries; fresh `docs/` screenshots and a
-  new `docs/demo.gif` recorded from the final build.
+  re-recorded cinematic `docs/demo.gif` (~30 s, 16.7 fps): a premium
+  custom cursor glides through connect → location switch → logs with
+  natural bezier motion, live hover states and double-ring click
+  ripples — scripted CDP screencast of the final build.
 * `pyflakes` stays clean; `python -m py_compile` across the tree.
 
 ## Verification
