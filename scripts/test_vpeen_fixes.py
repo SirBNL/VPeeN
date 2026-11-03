@@ -211,13 +211,18 @@ ensure_private_dir(tight)
 check("fresh dir is 0700", stat.S_IMODE(os.stat(tight).st_mode) == 0o700)
 
 print("== 10. gui/cli cleanups ==")
+# v4.4.0: the Tk GUI was replaced by the web UI; the connect/state-machine
+# logic the old checks guarded now lives in vpeen/webui.py (Bridge).
 gui_src = open(os.path.join(REPO, "vpeen", "gui.py")).read()
+bridge_src = open(os.path.join(REPO, "vpeen", "webui.py")).read()
 check("PHASE_CONNECTING import removed", "PHASE_CONNECTING" not in gui_src)
 check("dead free_n removed", "free_n" not in gui_src)
 check("ports must differ - connect path",
-      gui_src.count("socks_port == http_port") >= 2)
+      "socks_port == http_port" in bridge_src)
+check("ports must differ - settings path",
+      'cfg.get("socks_port") == cfg.get("http_port")' in bridge_src)
 check("pending_tunnel consumed after use",
-      "self.pending_tunnel = False" in gui_src)
+      "self._pending_tunnel = False" in bridge_src)
 cli_src = open(os.path.join(REPO, "vpeen", "cli.py")).read()
 check("cli: unused __version__ import removed",
       "from . import __version__" not in cli_src)
@@ -237,7 +242,7 @@ check("info_plist uses the dynamic version",
       '"CFBundleShortVersionString": _version' in spec_src
       and '"CFBundleVersion": _version' in spec_src)
 import vpeen  # noqa: E402
-check("version bumped to 4.3.1", vpeen.__version__ == "4.3.1")
+check("version bumped to 4.4.0", vpeen.__version__ == "4.4.0")
 
 print("== 13. import sweep (no import cycles) ==")
 for mod in ("vpeen.api", "vpeen.upstream", "vpeen.localproxy", "vpeen.dnsrelay",

@@ -4,6 +4,10 @@
 Bundles the tunnel helper binaries (tun2socks + wintun.dll) that match the
 BUILD machine's platform; CI runs one job per OS, so each release gets the
 right set.  Run scripts/fetch-binaries.py first.
+
+v4.4.0: the GUI is a local web app (vpeen/web) shown through pywebview
+(Windows/macOS) or the default browser (Linux).  CustomTkinter/Pillow/Tk
+are gone: the bundle no longer carries the whole Tk runtime.
 """
 import os
 import platform
@@ -22,29 +26,33 @@ with open(os.path.join("vpeen", "__init__.py"), "r", encoding="utf-8") as _f:
         _version = _m.group(1)
 print(f"VPeeN bundle version: {_version}")
 
-datas, binaries, hidden = [], [], []
-for pkg in ("customtkinter",):
-    d, b, h = collect_all(pkg)
-    datas += d
-    binaries += b
-    hidden += h
-# ImageTk registers the "PyImagingPhoto" Tk command via PIL._tkinter_finder;
-# without these hidden imports the frozen app crashes on the first flag icon.
-# "uuid" is imported dynamically nowhere anymore, but keep it pinned as a
-# belt-and-suspenders guard for frozen builds (regression v4.1.0: the Windows
-# build shipped without it because __import__("uuid") is invisible to the
-# static analysis -> fresh installs failed the locations fetch with
-# "No module named 'uuid'").
-hidden += ["PIL.ImageTk", "PIL._tkinter_finder", "uuid"]
+datas, binaries, hidden = [], [], []   # v4.4.0: web UI (no Tk/CustomTkinter)
+# ---- the web GUI assets (index.html / style.css / app.js)
+_web_dir = os.path.join("vpeen", "web")
+if os.path.isdir(_web_dir):
+    for _fn in sorted(os.listdir(_web_dir)):
+        if _fn.endswith((".html", ".css", ".js")):
+            datas.append((os.path.join(_web_dir, _fn), "vpeen/web"))
+else:
+    raise SystemExit("!! vpeen/web is missing - cannot bundle the GUI")
 
-# make sure the _tkinter C extension itself is always bundled (some venvs
-# keep it in a non-default location, e.g. a patched site-packages); when it
-# lives in the normal stdlib lib-dynload PyInstaller already handles it
-import importlib.util
-_tk_spec = importlib.util.find_spec("_tkinter")
-if _tk_spec and _tk_spec.origin and "site-packages" in _tk_spec.origin:
-    binaries.append((_tk_spec.origin, "."))
-    hidden.append("_tkinter")
+# ---- pywebview (optional native window).  Linux builds skip it; the
+# frozen app falls back to browser mode at runtime (vpeen.gui probes it).
+try:
+    import webview  # noqa: F401  - availability probe only
+    _have_webview = True
+except Exception:
+    _have_webview = False
+if _have_webview and not sys.platform.startswith("linux"):
+    _d, _b, _h = collect_all("webview")
+    datas += _d
+    binaries += _b
+    hidden += _h
+
+# v4.4.0: "uuid" stays pinned as a belt-and-suspenders guard for frozen
+# builds (regression v4.1.0: __import__("uuid") is invisible to static
+# analysis -> fresh installs failed the locations fetch).
+hidden += ["uuid"]
 for asset in ("icon.png", "icon.ico", "logo.png"):
     if os.path.exists(os.path.join("assets", asset)):
         datas.append((os.path.join("assets", asset), "assets"))
@@ -102,7 +110,8 @@ a = Analysis(
     hiddenimports=hidden,
     hookspath=[],
     runtime_hooks=[],
-    excludes=["matplotlib", "numpy", "pandas", "PySide6", "PyQt5", "test", "unittest"],
+    excludes=["matplotlib", "numpy", "pandas", "PySide6", "PyQt5",
+              "tkinter", "customtkinter", "PIL", "test", "unittest"],
     noarchive=False,
 )
 pyz = PYZ(a.pure)

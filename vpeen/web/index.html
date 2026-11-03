@@ -1,0 +1,249 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="dark">
+<title>VPeeN</title>
+<link rel="icon" type="image/png" href="/icon.png">
+<link rel="stylesheet" href="/style.css">
+</head>
+<body data-phase="disconnected" data-mode="proxy">
+
+<!-- ======================= ambient background ======================= -->
+<div id="bg" aria-hidden="true">
+  <div class="aurora a1"></div>
+  <div class="aurora a2"></div>
+  <div class="aurora a3"></div>
+  <div class="dotgrid"></div>
+  <div class="vignette"></div>
+</div>
+
+<!-- ======================= top bar ======================= -->
+<header class="topbar">
+  <div class="brand">
+    <svg class="brand-mark" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+      <defs>
+        <linearGradient id="bgrad" x1="0" y1="0" x2="24" y2="24">
+          <stop offset="0" stop-color="#2de3a7"/><stop offset=".55" stop-color="#38bdf8"/><stop offset="1" stop-color="#818cf8"/>
+        </linearGradient>
+      </defs>
+      <path d="M12 2l7.5 3v6.2c0 4.7-3.2 8.4-7.5 10.6C7.7 19.6 4.5 15.9 4.5 11.2V5L12 2z" stroke="url(#bgrad)" stroke-width="1.7" fill="rgba(45,227,167,.07)"/>
+      <path d="M12 8.2l2.6 4.5-2.6-1-2.6 1L12 8.2z" fill="url(#bgrad)"/>
+      <path d="M9.4 13.9h5.2" stroke="url(#bgrad)" stroke-width="1.4" stroke-linecap="round"/>
+    </svg>
+    <span class="brand-name">VPeeN</span>
+    <span class="brand-tag">FREE</span>
+  </div>
+  <div class="top-right">
+    <div class="status-pill" id="net-pill"><span class="status-dot"></span><span id="net-label">Offline</span></div>
+    <button class="icon-btn" id="btn-logs" title="Connection logs" aria-label="Logs">
+      <svg viewBox="0 0 24 24"><path d="M4 17l6-5-6-5M12 19h8"/></svg>
+    </button>
+    <button class="icon-btn" id="btn-settings" title="Settings" aria-label="Settings">
+      <svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 1 1-4 0v-.09a1.65 1.65 0 0 0-1-1.51 1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 1 1 0-4h.09a1.65 1.65 0 0 0 1.51-1 1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33h.09a1.65 1.65 0 0 0 1-1.51V3a2 2 0 1 1 4 0v.09a1.65 1.65 0 0 0 1 1.51h.09a1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82v.09a1.65 1.65 0 0 0 1.51 1H21a2 2 0 1 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>
+    </button>
+  </div>
+</header>
+
+<!-- ======================= main stage ======================= -->
+<main class="stage">
+  <section class="hero">
+    <div class="orb-zone">
+      <div class="orb-halo" id="orb-halo" aria-hidden="true"></div>
+      <div class="orb" id="orb" role="button" tabindex="0" aria-label="Connect or disconnect">
+        <svg class="orb-rings" viewBox="0 0 300 300" aria-hidden="true">
+          <defs>
+            <linearGradient id="ring-grad" x1="0" y1="0" x2="300" y2="300" gradientUnits="userSpaceOnUse">
+              <stop offset="0" stop-color="#2de3a7"/><stop offset=".55" stop-color="#38bdf8"/><stop offset="1" stop-color="#818cf8"/>
+            </linearGradient>
+          </defs>
+          <circle class="ring-track" cx="150" cy="150" r="120"/>
+          <circle class="ring-dashes" cx="150" cy="150" r="134"/>
+          <circle class="ring-progress" id="ring-progress" cx="150" cy="150" r="120"/>
+        </svg>
+        <div class="orb-core">
+          <svg class="power-glyph" viewBox="0 0 24 24" aria-hidden="true">
+            <path d="M12 3v8"/><path d="M6.3 6.5a8 8 0 1 0 11.4 0"/>
+          </svg>
+        </div>
+        <div class="orb-focus" aria-hidden="true"></div>
+      </div>
+    </div>
+
+    <h1 class="status-title" id="status-title">Not Protected</h1>
+    <p class="status-sub" id="status-sub">Your traffic is exposed — press connect to secure it</p>
+
+    <div class="loc-select" id="loc-select" role="button" tabindex="0" aria-label="Choose location">
+      <span class="loc-flag" id="loc-flag">
+        <svg viewBox="0 0 24 24" class="globe" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M3 12h18M12 3a13.5 13.5 0 0 1 0 18M12 3a13.5 13.5 0 0 0 0 18"/></svg>
+      </span>
+      <span class="loc-text">
+        <span class="loc-city" id="loc-city">Optimal Location</span>
+        <span class="loc-country" id="loc-country">Fastest free server</span>
+      </span>
+      <svg class="chev" viewBox="0 0 24 24" aria-hidden="true"><path d="M9 6l6 6-6 6"/></svg>
+    </div>
+  </section>
+
+  <section class="stats-row" id="stats-row">
+    <div class="stat" title="Total data downloaded through the tunnel">
+      <div class="stat-label"><svg viewBox="0 0 24 24"><path d="M12 4v12m0 0l-5-5m5 5l5-5M4 20h16"/></svg>Downloaded</div>
+      <div class="stat-value" id="stat-down">0 B</div>
+      <div class="stat-note" id="stat-down-note">—</div>
+    </div>
+    <div class="stat" title="Total data uploaded through the tunnel">
+      <div class="stat-label"><svg viewBox="0 0 24 24"><path d="M12 20V8m0 0l-5 5m5-5l5 5M4 4h16"/></svg>Uploaded</div>
+      <div class="stat-value" id="stat-up">0 B</div>
+      <div class="stat-note" id="stat-up-note">—</div>
+    </div>
+    <div class="stat" title="Current session duration">
+      <div class="stat-label"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/></svg>Session</div>
+      <div class="stat-value" id="stat-time">00:00</div>
+      <div class="stat-note" id="stat-time-note">not connected</div>
+    </div>
+    <div class="stat stat-click" id="stat-ip-card" title="Click to copy">
+      <div class="stat-label"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M3 12h18M12 3a13.5 13.5 0 0 1 0 18M12 3a13.5 13.5 0 0 0 0 18"/></svg>IP Address</div>
+      <div class="stat-value" id="stat-ip">—</div>
+      <div class="stat-note" id="stat-ip-note">your real IP</div>
+    </div>
+  </section>
+</main>
+
+<!-- ======================= bottom bar ======================= -->
+<footer class="bottombar">
+  <div class="modes">
+    <label class="switch" id="sw-system" title="Set the system-wide proxy automatically when connecting (browsers and apps that honour it)">
+      <input type="checkbox" id="in-system"><span class="track"></span>
+      <span class="sw-label">System&nbsp;Proxy</span>
+    </label>
+    <label class="switch" id="sw-tunnel" title="Route ALL device traffic through a VPN tunnel (needs admin)">
+      <input type="checkbox" id="in-tunnel"><span class="track"></span>
+      <span class="sw-label">VPN&nbsp;Tunnel</span>
+    </label>
+  </div>
+  <div class="foot-meta">
+    <span id="listeners-meta">SOCKS5 :1080 · HTTP :8080</span>
+    <span class="sep">·</span><span id="ver-meta">v4.4</span>
+  </div>
+</footer>
+
+<!-- ======================= scrim ======================= -->
+<div class="scrim" id="scrim" aria-hidden="true"></div>
+
+<!-- ======================= servers sheet ======================= -->
+<aside class="sheet" id="sheet-servers" aria-label="Locations">
+  <div class="sheet-head">
+    <h2>Locations</h2>
+    <span class="count-badge" id="free-count">7 free</span>
+    <span class="flex-spacer"></span>
+    <button class="icon-btn" id="btn-refresh" title="Refresh latencies">
+      <svg viewBox="0 0 24 24"><path d="M21 12a9 9 0 1 1-2.64-6.36M21 3v6h-6"/></svg>
+    </button>
+    <button class="icon-btn" id="btn-servers-close" title="Close">
+      <svg viewBox="0 0 24 24"><path d="M18 6L6 18M6 6l12 12"/></svg>
+    </button>
+  </div>
+  <div class="search">
+    <svg viewBox="0 0 24 24"><circle cx="11" cy="11" r="7"/><path d="M20 20l-4-4"/></svg>
+    <input id="search" type="text" placeholder="Search locations" autocomplete="off" spellcheck="false">
+  </div>
+  <button class="optimal-card" id="optimal-card" title="Let VPeeN pick the fastest free server">
+    <span class="opt-icon"><svg viewBox="0 0 24 24"><path d="M13 2L4.5 13.5H11L9.5 22 18 10.5h-6.5L13 2z"/></svg></span>
+    <span class="opt-text">
+      <span class="opt-title">Optimal Location</span>
+      <span class="opt-sub">fastest free server</span>
+    </span>
+    <span class="opt-ping" id="optimal-ping"><span class="ping-bars" data-level="0"><i></i><i></i><i></i><i></i></span><span class="ms">—</span></span>
+  </button>
+  <div class="list-caption" id="list-caption">Free locations</div>
+  <div class="loc-list" id="loc-list"></div>
+  <div class="sheet-foot" id="sheet-foot">Premium locations are hidden — unavailable on the free tier.</div>
+</aside>
+
+<!-- ======================= logs sheet ======================= -->
+<aside class="sheet sheet-logs" id="sheet-logs" aria-label="Logs">
+  <div class="sheet-head">
+    <h2>Connection&nbsp;Logs</h2>
+    <span class="flex-spacer"></span>
+    <button class="icon-btn" id="btn-logs-copy" title="Copy log">
+      <svg viewBox="0 0 24 24"><rect x="9" y="9" width="12" height="12" rx="2"/><path d="M5 15V5a2 2 0 0 1 2-2h10"/></svg>
+    </button>
+    <button class="icon-btn" id="btn-logs-close" title="Close">
+      <svg viewBox="0 0 24 24"><path d="M18 6L6 18M6 6l12 12"/></svg>
+    </button>
+  </div>
+  <div class="log-lines" id="log-lines"></div>
+</aside>
+
+<!-- ======================= settings modal ======================= -->
+<div class="modal" id="modal-settings" role="dialog" aria-modal="true" aria-label="Settings">
+  <div class="modal-card">
+    <div class="modal-head">
+      <h2>Settings</h2>
+      <button class="icon-btn" id="btn-settings-close" title="Close">
+        <svg viewBox="0 0 24 24"><path d="M18 6L6 18M6 6l12 12"/></svg>
+      </button>
+    </div>
+
+    <div class="modal-body">
+      <div class="set-group">
+        <div class="set-group-title">Local proxy</div>
+        <div class="set-row">
+          <label for="set-bind">Bind address</label>
+          <input id="set-bind" type="text" class="set-input" spellcheck="false">
+        </div>
+        <div class="set-row">
+          <label for="set-socks">SOCKS5 port</label>
+          <input id="set-socks" type="number" class="set-input num" min="1" max="65535">
+        </div>
+        <div class="set-row">
+          <label for="set-http">HTTP port</label>
+          <input id="set-http" type="number" class="set-input num" min="1" max="65535">
+        </div>
+        <div class="set-row set-row-t">
+          <label>Auto system proxy
+            <span class="set-hint">applies on next connect</span></label>
+          <label class="switch sm"><input type="checkbox" id="set-autoproxy"><span class="track"></span></label>
+        </div>
+      </div>
+
+      <div class="set-group">
+        <div class="set-group-title">VPN tunnel</div>
+        <div class="set-row set-row-t">
+          <label>Route DNS through the tunnel
+            <span class="set-hint">prevents DNS leaks</span></label>
+          <label class="switch sm"><input type="checkbox" id="set-tunneldns"><span class="track"></span></label>
+        </div>
+        <div class="set-row set-row-t">
+          <label>Fall back to proxy mode
+            <span class="set-hint">if the tunnel cannot start</span></label>
+          <label class="switch sm"><input type="checkbox" id="set-tunfallback"><span class="track"></span></label>
+        </div>
+        <div class="set-row">
+          <label for="set-mtu">Tunnel MTU</label>
+          <input id="set-mtu" type="number" class="set-input num" min="1200" max="9000" step="100">
+        </div>
+        <div class="set-row set-row-t">
+          <label>Clean up crashed sessions
+            <span class="set-hint">sweep leftover state on start</span></label>
+          <label class="switch sm"><input type="checkbox" id="set-sweep"><span class="track"></span></label>
+        </div>
+      </div>
+
+      <div class="set-note" id="set-note"></div>
+    </div>
+
+    <div class="modal-foot">
+      <button class="btn ghost" id="btn-settings-cancel">Cancel</button>
+      <button class="btn primary" id="btn-settings-save">Save changes</button>
+    </div>
+  </div>
+</div>
+
+<!-- ======================= toasts ======================= -->
+<div class="toasts" id="toasts" aria-live="polite"></div>
+
+<script src="/app.js"></script>
+</body>
+</html>

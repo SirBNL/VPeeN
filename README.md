@@ -4,19 +4,20 @@
 
 # 🛡️ VPeeN
 
-**The free VeePN browser-extension network — for your entire operating system.**
+### The free VeePN browser-extension network — for your entire operating system.
 
 **شبکه رایگان افزونه VeePN — این بار برای کل سیستم‌عامل تو.**
 
-No login · No subscription · No browser needed
+`No login` · `No subscription` · `No browser needed` · `Pure-Python core`
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-00d68f.svg?style=for-the-badge&labelColor=0e1526)](LICENSE)
 [![Platform](https://img.shields.io/badge/Platform-Windows%20%7C%20macOS%20%7C%20Linux-2f81f7.svg?style=for-the-badge&labelColor=0e1526)](#-quick-start)
 [![Python](https://img.shields.io/badge/Python-3.9%2B-ffd43b.svg?style=for-the-badge&labelColor=0e1526)](https://www.python.org/)
+[![GUI](https://img.shields.io/badge/GUI-Aurora%20v4.4-2de3a7.svg?style=for-the-badge&labelColor=0e1526)](#-whats-new-in-v440)
 [![Release](https://img.shields.io/github/v/release/SirBNL/VPeeN?style=for-the-badge&labelColor=0e1526&color=00d68f)](../../releases)
 [![Stars](https://img.shields.io/github/stars/SirBNL/VPeeN?style=for-the-badge&labelColor=0e1526&color=ffcb2f)](../../stargazers)
 
-<img src="docs/demo.gif" alt="VPeeN demo — connect and watch your IP roll to the new one" width="90%"/>
+<img src="docs/demo.gif" alt="VPeeN Aurora UI — connect, switch locations, watch live traffic" width="88%"/>
 
 </div>
 
@@ -26,46 +27,55 @@ No login · No subscription · No browser needed
 
 The VeePN Chrome extension is free, needs no account, and tunnels browser traffic through a
 global proxy network. **VPeeN** speaks the same protocol natively and brings those tunnels to
-every app on your machine — wrapped in a clean, modern desktop interface.
+**every app on your machine** — wrapped in a product-grade desktop interface.
 
 - 🖥️ **System-wide** — browsers, games, download managers, CLIs: everything is covered
 - 🙈 **Anonymous** — guest tokens only, nothing to sign up for
 - 🚪 **Browser-free** — Chrome can stay closed; VPeeN talks to the network directly
 - 🧩 **Standard interfaces** — plain SOCKS5 and HTTP proxies on localhost
+- 🎨 **“Aurora” GUI (v4.4)** — an animated power orb, drifting aurora gradients, live
+  latency bars and realtime traffic stats — a local web app in a native window
+  (pywebview) or your browser. No Tk, no Electron, no heavy frameworks
+- 🆓 **Free-tier honest** — the list shows the 7 locations the free network actually
+  serves, with real measured latency; the 178 premium ones are hidden instead of failing
 
 ```mermaid
 flowchart LR
     A["🖥️ Your apps"] -->|"SOCKS5 / HTTP on 127.0.0.1"| B["VPeeN"]
-    B -->|"secure tunnel"| C["🌍 VeePN free network"]
+    B -->|"encrypted tunnel"| C["🌍 VeePN free network"]
     C --> D["Internet"]
-    style B fill:#3e7af4,color:#ffffff,stroke:#3e7af4
-    style A fill:#141d33,color:#eaf1fb,stroke:#22304d
-    style C fill:#141d33,color:#eaf1fb,stroke:#22304d
-    style D fill:#141d33,color:#eaf1fb,stroke:#22304d
+    style B fill:#0f766e,color:#d7fbee,stroke:#2de3a7
+    style A fill:#0e1526,color:#eaf1fb,stroke:#22304d
+    style C fill:#0e1526,color:#eaf1fb,stroke:#22304d
+    style D fill:#0e1526,color:#eaf1fb,stroke:#22304d
 ```
 
 ## ✨ Features
 
 | | Feature | Details |
 |---|---|---|
-| ⚡ | **One-click connect** | A big, honest power button with a live pulse while working |
-| 🌍 | **Location picker** | Flag-tagged list of all 185 locations, live search, *Free* tab, *Fastest* sort |
-| 🔒 | **Real VPN Tunnel (TUN)** | Hiddify-style full-system tunnel — every app, zero config (see below) |
-| 🖥️ | **System proxy mode** | Classic SOCKS5/HTTP mode with a one-switch OS setup + restore |
-| 🎲 | **IP roll animation** | Watch your IP digits spin and settle on the new one |
+| ⚡ | **One-click connect** | A big, honest power orb — pulse while connecting, glow when protected, red arc on error |
+| 🌍 | **Location picker** | Flag-tagged list of the free locations, live search, real measured latency bars, “Optimal” auto-pick |
+| 📡 | **Realtime stats** | Down/up totals **with live rates**, session timer, connection counters — updated every second |
 | 🕵️ | **IP monitor** | Real IP when offline, exit IP when protected — one click to copy |
-| ⏱️ | **Session timer** | Exactly how long you have been protected |
+| 🔒 | **Real VPN Tunnel (TUN)** | Hiddify-style full-system tunnel — every app, zero config (see below) |
+| 🖥️ | **System proxy mode** | Classic SOCKS5/HTTP mode with a one-switch OS setup + clean restore on exit |
 | 🛡️ | **DNS leak protection** | In tunnel mode DNS is relayed through the tunnel itself |
-| 📜 | **Activity log** | Color-coded, autoscrolling, exportable to a file |
-| ⚙️ | **Settings** | Ports, tunnel MTU, DNS relay, auto-connect, crash cleanup |
-| 🔁 | **Self-healing tunnels** | Round-robin across servers, automatic retry on failure |
-| 📦 | **Zero runtime deps** | The core engine is pure Python standard library |
+| 📜 | **Activity log** | Color-coded, autoscrolling, one-click copy — every step of every connection |
+| ⚙️ | **Settings** | Ports, bind, tunnel MTU, DNS relay, fallback policy, crash cleanup — all validated on save |
+| 🔁 | **Self-healing tunnels** | Round-robin across servers, automatic retry and credential rotation on failure |
+| ♿ | **Accessible & smooth** | Full keyboard operation, focus rings, `prefers-reduced-motion` support |
+| 📦 | **Zero runtime deps** | The core engine is pure Python standard library — the GUI is plain HTML/CSS/JS |
 
 <div align="center">
 
-| Connect | Logs | Settings |
-|:---:|:---:|:---:|
-| <img src="docs/screenshot-connect.png" width="275"/> | <img src="docs/screenshot-logs.png" width="275"/> | <img src="docs/screenshot-settings.png" width="275"/> |
+**The connect flow** — idle · connecting · protected
+
+<img src="docs/screenshot-main.png" width="32%"/> <img src="docs/screenshot-connecting.png" width="32%"/> <img src="docs/screenshot-connect.png" width="32%"/>
+
+**The app** — locations · logs · settings
+
+<img src="docs/screenshot-locations.png" width="32%"/> <img src="docs/screenshot-logs.png" width="32%"/> <img src="docs/screenshot-settings.png" width="32%"/>
 
 </div>
 
@@ -81,26 +91,26 @@ Download from [**Releases**](../../releases):
 | `VPeeN-macOS.zip` | macOS 10.13+ | unzip → `VPeeN.app` *(right-click → Open, the first time)* |
 | `VPeeN-Linux.tar.gz` | Linux x64 | extract → `./VPeeN` |
 
-> Linux tip: if fonts look odd in the bundled build, prefer Option 2 — running from source
-> uses your system's font stack and looks perfect.
+> Windows/macOS open the UI in a native desktop window (pywebview); Linux (and any machine
+> without a webview backend) opens it in your default browser — same UI, same features.
 
 ### Option 2 — Run from source
 
 ```bash
 git clone https://github.com/SirBNL/VPeeN.git
 cd VPeeN
-pip install -r requirements.txt
+pip install -r requirements.txt     # optional: native window (pywebview)
 python main.py
 ```
 
-The app starts, shows your real IP, fetches free locations — press the power button.
+The app starts, shows your real IP, fetches free locations with live latency — press the power orb.
 
 ### Option 3 — Headless CLI
 
 No GUI needed (servers, routers, scripts):
 
 ```bash
-python -m vpeen.cli list                 # list free locations
+python -m vpeen.cli list                 # list free locations + latency
 python -m vpeen.cli test nl              # full chain test: token → server → exit IP
 python -m vpeen.cli run --region us-va   # SOCKS5 :1080 + HTTP :8080
 python -m vpeen.cli run --best           # auto-pick the optimal region
@@ -122,14 +132,19 @@ VPeeN reproduces what the free VeePN extension does inside the browser — but f
    No account is ever created.
 2. **Locations & servers** — the free location list and per-session credentials are fetched
    from VeePN's live infrastructure, so the app keeps working as endpoints evolve.
-3. **Local proxy** — VPeeN listens as a standard SOCKS5 + HTTP proxy on `127.0.0.1`.
+3. **Local proxy** — VPeeN listens as a standard SOCKS5 + HTTP proxy on `127.0.0.1`
+   (a non-loopback bind without credentials is refused outright).
 4. **Tunneling** — every connection is relayed through an encrypted tunnel to the selected region.
 5. **System switch** — optionally flips the OS proxy on (Windows / macOS / GNOME) and restores
    the previous state on exit.
 
+The GUI itself is a tiny loopback-only web app: a stdlib HTTP server runs the proxy core and
+streams events to the UI over a long-poll `/api/poll` endpoint — the interface reacts in
+under a second with zero third-party JavaScript.
+
 ## 🔒 Tunnel Mode — a real VPN, the Hiddify way
 
-Flip the **VPN Tunnel (all traffic)** switch and VPeeN stops being "just a proxy" and becomes
+Flip the **VPN Tunnel** switch and VPeeN stops being “just a proxy” and becomes
 a **system-wide VPN**: a virtual network adapter takes over all of your traffic — not just the
 apps that know about proxies.
 
@@ -140,12 +155,12 @@ flowchart LR
     C -->|"socks5 over loopback"| D["VPeeN core"]
     D -->|"encrypted tunnel"| E["🌍 VeePN network"]
     E --> F["Internet"]
-    style D fill:#3e7af4,color:#ffffff,stroke:#3e7af4
-    style A fill:#141d33,color:#eaf1fb,stroke:#22304d
-    style B fill:#141d33,color:#eaf1fb,stroke:#22304d
-    style C fill:#141d33,color:#eaf1fb,stroke:#22304d
-    style E fill:#141d33,color:#eaf1fb,stroke:#22304d
-    style F fill:#141d33,color:#eaf1fb,stroke:#22304d
+    style D fill:#0f766e,color:#d7fbee,stroke:#2de3a7
+    style A fill:#0e1526,color:#eaf1fb,stroke:#22304d
+    style B fill:#0e1526,color:#eaf1fb,stroke:#22304d
+    style C fill:#0e1526,color:#eaf1fb,stroke:#22304d
+    style E fill:#0e1526,color:#eaf1fb,stroke:#22304d
+    style F fill:#0e1526,color:#eaf1fb,stroke:#22304d
 ```
 
 Under the hood this is the same architecture Hiddify / sing-box use: a TUN device
@@ -161,7 +176,7 @@ launches as a properly elevated helper and points at its own local SOCKS5.
 | 🧭 **Anti-loop routes** | The VPN servers themselves are pinned to your real gateway, so the tunnel can never route into itself |
 | 🏠 **LAN stays up** | Local network traffic (printers, NAS, router admin) is untouched |
 | 📡 **DNS through the tunnel** | The TUN adapter's DNS points at VPeeN's internal relay — your system DNS settings are never modified |
-| 🛑 **Explicit failure, never silent** (v4.3.0) | If the tunnel drops, you SEE it: a red "TUNNEL FAILED" warning explains that coverage is now partial — or, with the new Settings switch turned off, VPeeN stops instead of quietly downgrading you to proxy mode |
+| 🛑 **Explicit failure, never silent** | If the tunnel drops, you SEE it: a loud warning explains that coverage is now partial — or, with the fallback switch turned off, VPeeN stops instead of quietly downgrading you to proxy mode |
 | 💓 **Heartbeat watchdog** | If the GUI dies, the elevated helper notices within seconds and tears everything down |
 | 🧹 **Crash journal** | Every route change is journaled to disk; after a hard crash the next launch cleans up automatically |
 | ♻️ **Adapter auto-removal** | The wintun adapter lives only as long as the process — kill anything, Windows cleans itself |
@@ -193,9 +208,11 @@ version tags (`v*`) automatically produce a [release](../../releases) with binar
 
 ```
 VPeeN/
-├── main.py               # GUI launcher
+├── main.py               # GUI launcher (+ tunnel-worker dispatch, crash log)
 ├── vpeen/
-│   ├── gui.py            # CustomTkinter interface (hero / location panel / logs / settings)
+│   ├── gui.py            # desktop window launcher (pywebview → browser fallback)
+│   ├── webui.py          # local web-UI server + core/tunnel bridge (loopback only)
+│   ├── web/              # the "Aurora" GUI (index.html / style.css / app.js)
 │   ├── core.py           # background proxy engine + GUI event bridge
 │   ├── api.py            # VeePN network client (tokens, locations, servers)
 │   ├── upstream.py       # encrypted upstream tunnels
@@ -204,7 +221,7 @@ VPeeN/
 │   ├── tunnel_platforms.py  # per-OS TUN routes / DNS / session journal
 │   ├── dnsrelay.py       # DNS relay that tunnels DNS through VPeeN
 │   ├── systemproxy.py    # OS proxy switch (Win / macOS / GNOME)
-│   ├── settings.py       # persistent app settings
+│   ├── settings.py       # persistent app settings (atomic writes)
 │   ├── cli.py            # headless command-line mode
 │   └── utils.py          # shared helpers
 ├── assets/               # icon, logo, banner, flags/ (92 circular flags)
@@ -219,7 +236,7 @@ VPeeN/
 |---|---|---|
 | [tun2socks](https://github.com/xjasonlyu/tun2socks) v2.7.0 | **MIT** | TUN engine for Tunnel mode (fetched at build time, never at runtime) |
 | [wintun](https://www.wintun.net/) 0.14.1 | Wintun Prebuilt Binaries License | signed virtual-adapter driver (Windows, used via its permitted API) |
-| [CustomTkinter](https://github.com/TomSchimansky/CustomTkinter) | MIT | UI framework |
+| [pywebview](https://pywebview.ngole.io/) | BSD-3 | native desktop window for the web GUI (optional; falls back to the browser) |
 | Flags | [flagcdn](https://flagcdn.com/) (public domain) | circular country flags |
 
 ## ❓ FAQ
@@ -236,7 +253,7 @@ The app fetches the live list — run <code>python -m vpeen.cli list</code> to s
 </details>
 
 <details>
-<summary><b>Is this a "real" VPN?</b></summary>
+<summary><b>Is this a “real” VPN?</b></summary>
 With <b>Tunnel mode</b> — yes for TCP and DNS: a virtual network adapter routes your system's
 TCP traffic through the VPN tunnel with DNS leak protection, exactly like Hiddify/sing-box do it.
 Being honest about the limits: the upstream is an HTTPS-CONNECT (TCP-only) proxy, so <b>non-DNS
@@ -254,6 +271,24 @@ permissions and the directory with <code>0700</code> (POSIX), so only your user 
 </details>
 
 <details>
+<summary><b>What changed in v4.4.0 (Aurora)?</b></summary>
+<ul>
+<li><b>The GUI is a local web app now.</b> A loopback-only server (pure stdlib) runs the proxy
+core and streams events to a vanilla HTML/CSS/JS interface — shown in a native pywebview window
+or your browser. CustomTkinter, Pillow and the whole Tk runtime are gone: smaller bundles,
+faster startup, and a UI Tk could never render (gradients, glow, smooth animations).</li>
+<li><b>Live latency + live traffic rates</b> in the location list and stat cards.</li>
+<li><b>Audit pass:</b> 12 defects found and fixed in the new bridge/UI — including a demo-data
+crash on connect, tunnel mode never reporting the exit country, an 8-second hang on tunnel
+disconnect, silent saving of invalid ports/MTU, and HTTP handlers that died mid-response on
+bridge errors. Full list with test evidence:
+<a href="CHANGELOG-v4.4.0.md">CHANGELOG-v4.4.0.md</a>.</li>
+<li><b>Test suites:</b> 27 new end-to-end checks (<code>scripts/test_webui_demo.py</code>) on top
+of the existing 59 + 11.</li>
+</ul>
+</details>
+
+<details>
 <summary><b>What changed in v4.3.0 (security pass)?</b></summary>
 <ul>
 <li><b>Local proxy auth</b> — the CLI (<code>python -m vpeen.cli run</code>) accepts
@@ -261,14 +296,13 @@ permissions and the directory with <code>0700</code> (POSIX), so only your user 
 <li><b>Bind safety</b> — a non-loopback bind without credentials is refused outright; the GUI is
 loopback-only and its Bind field is now actually applied (it used to be stored but ignored).</li>
 <li><b>Explicit TUN failure</b> — no more silent fallback to proxy mode: loud warning, or full stop
-if you disable the new "On TUN failure, fall back to proxy" switch in Settings.</li>
+if you disable the “Fall back to proxy mode” switch in Settings.</li>
 <li><b>UDP ASSOCIATE (DNS)</b> — DNS datagrams are relayed through the tunnel; other UDP is dropped
 deliberately (the upstream is TCP-only).</li>
 <li><b>Secrets hygiene</b> — <code>export</code> masks the upstream password unless
 <code>--show-secrets</code>; state files are 0600/0700.</li>
 <li><b>API hardening</b> — reserve API domains must be HTTPS with a sane hostname before the Bearer
-token is ever sent there, every domain in the rotation is actually tried (a fixed attempt count
-used to make the last default domain and all reserve domains unreachable), and one request can
+token is ever sent there, every domain in the rotation is actually tried, and one request can
 never stall past a 120s wall-clock budget.</li>
 <li><b>macOS restore fidelity</b> — the pre-existing per-service proxy (enabled, host, port) is
 backed up and restored exactly, instead of blindly switching proxies off.</li>
@@ -295,25 +329,25 @@ Respect the laws of your country and the networks you connect to.
 # 🇮🇷 راهنمای فارسی
 
 **VPeeN** همون شبکه‌ای رو که افزونه رایگان VeePN توی مرورگر در اختیارت می‌ذاره، برای
-**کل سیستم‌عامل** باز می‌کنه — با یک رابط گرافیکی تمیز و مدرن، بدون ثبت‌نام و بدون نیاز به کروم.
+**کل سیستم‌عامل** باز می‌کنه — با رابط گرافیکی «Aurora» مدرن و انیمیشنی، بدون ثبت‌نام و بدون نیاز به کروم.
 
 ## ✨ ویژگی‌ها
 
-- ⚡ **اتصال با یک کلیک** — دکمه پاور بزرگ با انیمیشن پالس زنده
-- 🌍 **انتخاب موقعیت** — لیست هر ۱۸۵ لوکیشن با پرچم کشور، جستجوی زنده، تب «رایگان» و مرتب‌سازی «سریع‌ترین»
+- ⚡ **اتصال با یک کلیک** — اورب پاور بزرگ: موقع اتصال می‌تپه، موقع محافظت می‌درخشه، موقع خطا قرمز می‌شه
+- 🌍 **انتخاب موقعیت** — لیست لوکیشن‌های رایگان با پرچم کشور، جستجوی زنده و **پینگ واقعیِ اندازه‌گیری‌شده** برای هر سرور + انتخاب خودکار «بهترین»
+- 📡 **آمار زنده** — حجم دانلود/آپلود **با نرخ لحظه‌ای**، تایمر جلسه و شمارنده اتصال‌ها، هر ثانیه آپدیت
+- 🕵️ **مانیتور IP** — زمان قطع: IP واقعی تو؛ زمان اتصال: IP خروجی — با یک کلیک کپی می‌شه
 - 🔒 **تانل واقعی VPN (حالت TUN)** — تانل کامل مثل Hiddify؛ کل ترافیک سیستم بدون هیچ تنظیماتی
 - 🖥️ **حالت پروکسی سیستم** — SOCKS5/HTTP کلاسیک با ست/بازیابی خودکار پروکسی سیستم‌عامل
-- 🎲 **انیمیشن تغییر IP** — ارقام IP موقع اتصال می‌چرخند و روی IP جدید می‌ایستند
-- 🕵️ **مانیتور IP** — زمان قطع: IP واقعی تو؛ زمان اتصال: IP خروجی — با یک کلیک کپی می‌شه
-- ⏱️ **تایمر جلسه** — دقیقاً می‌گه چقدره که محافظت می‌شی
 - 🛡️ **ضد نشت DNS** — در حالت تانل، خود DNS هم از داخل تانل رد می‌شه
-- 📜 **لاگ کامل فعالیت** — رنگی، اسکرول خودکار، قابل ذخیره در فایل
-- ⚙️ **تنظیمات** — پورت‌ها، MTU تانل، رله DNS، اتصال خودکار، پاک‌سازی بعد از کرش
+- 📜 **لاگ کامل فعالیت** — رنگی، اسکرول خودکار، با یک کلیک کپی
+- ⚙️ **تنظیمات** — پورت‌ها، MTU تانل، رله DNS، سیاست fallback، پاک‌سازی بعد از کرش — همه موقع ذخیره اعتبارسنجی می‌شن
 - 🔁 **تانل خودترمیم** — توزیع بار بین سرورها و تلاش مجدد خودکار
+- ♿ **دسترس‌پذیر** — کاملاً با کیبورد کار می‌کنه و حرکت‌های انیمیشن رو برای کاربران حساس کاهش می‌ده
 
 ## 🔒 حالت تانل — یک VPN واقعی، مثل Hiddify
 
-کلید **VPN Tunnel (all traffic)** رو بزن تا VPeeN از «فقط یک پروکسی» به یک **VPN سراسری واقعی** تبدیل بشه:
+کلید **VPN Tunnel** رو بزن تا VPeeN از «فقط یک پروکسی» به یک **VPN سراسری واقعی** تبدیل بشه:
 یک کارت شبکه مجازی کل ترافیک سیستم رو می‌گیره — حتی برنامه‌هایی که مفهوم پروکسی رو نمی‌فهمن.
 
 همون معماری Hiddify و sing-box: آداپتور TUN ([wintun](https://www.wintun.net/) در ویندوز، `utun` در مک،
@@ -327,6 +361,7 @@ Respect the laws of your country and the networks you connect to.
 | 🧭 **مسیر ضد حلقه** | IP سرورهای VPN به گیت‌وی اصلی قفل می‌شن تا تانل هیچ‌وقت داخل خودش نیافته |
 | 🏠 **شبکه محلی سالم می‌مونه** | ترافیک LAN (پرینتر، NAS، پنل مودم) دست‌نخورده |
 | 📡 **DNS از داخل تانل** | DNS آداپتور مجازی به رله داخلی VPeeN اشاره می‌کنه؛ تنظیمات DNS سیستم تو هیچ‌وقت عوض نمی‌شه |
+| 🛑 **خطای شفاف، نه سکوت** | اگه تانل بیفته، صریح می‌بینی — یا با خاموش‌کردن سوییچ fallback، VPeeN کلاً می‌ایسته تا مخفی‌وار به پروکسی برگرده |
 | 💓 **نگهبان ضربان** | اگه رابط گرافیکی بمیره، هلپر elevated ظرف چند ثانیه همه‌چیز رو برمی‌گردونه |
 | 🧹 **ژورنال کرش** | تک‌تک تغییرات مسیرها روی دیسک ثبت می‌شه؛ بعد از کرش سخت، اجرای بعدی خودش پاک می‌کنه |
 | ♻️ **حذف خودکار آداپتور** | آداپتور wintun فقط تا وقتی پروسه‌اش زنده‌ست وجود داره |
@@ -362,7 +397,7 @@ python main.py
 **روش ۳ — خط فرمان (بدون رابط گرافیکی):**
 
 ```bash
-python -m vpeen.cli list                  # لیست لوکیشن‌های رایگان
+python -m vpeen.cli list                  # لیست لوکیشن‌های رایگان + پینگ
 python -m vpeen.cli test nl               # تست کامل زنجیره
 python -m vpeen.cli run --region us-va    # SOCKS5 :1080 + HTTP :8080
 python -m vpeen.cli export nl             # نمایش کانفیگ خام آپ‌استریم
@@ -374,6 +409,16 @@ python -m vpeen.cli export nl             # نمایش کانفیگ خام آپ�
 SOCKS5 :  socks5://127.0.0.1:1080
 HTTP   :  http://127.0.0.1:8080
 ```
+
+## 🆕 تازه‌های نسخه ۴.۴ (Aurora)
+
+- **رابط گرافیکی جدید «Aurora»** — به‌جای Tk قدیمی، حالا یک وب‌اپ محلی با انیمیشن‌های نرم،
+  گرادیان‌های aurora و اورب پاور متحرک؛ در پنجره بومی (pywebview) یا مرورگر اجرا می‌شه
+- **پینگ واقعی و نرخ ترافیک زنده** در لیست لوکیشن‌ها و کارت‌های آمار
+- **رفع ۱۲ باگ** در بریج و رابط جدید — از جمله کرش اتصال در داده‌ی دمو، نشان‌داده‌نشدن کشورِ
+  خروجی در حالت تانل، ۸ ثانیه معطلی موقع قطع تانل، و ذخیره‌ی بی‌صدای پورت‌های نامعتبر
+  (<a href="CHANGELOG-v4.4.0.md">فهرست کامل</a>)
+- **۲۷ تست انتها-به-انتهای جدید** روی مانده به ۵۹+۱۱ تست قبلی
 
 ## ❓ سوالات متداول
 
@@ -413,4 +458,5 @@ HTTP   :  http://127.0.0.1:8080
 <br/>
 <b>⭐ If VPeeN saved you some money, a star is the best thank-you.</b><br/>
 <a href="../../stargazers"><img src="https://img.shields.io/badge/%E2%AD%90-Star%20on%20GitHub-ffcb2f?style=for-the-badge&labelColor=0e1526"/></a>
+<br/><sub>v4.4.0 “Aurora” · pure-Python core · zero-dependency GUI</sub>
 </div>

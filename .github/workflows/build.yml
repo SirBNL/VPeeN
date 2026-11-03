@@ -34,15 +34,16 @@ jobs:
         shell: bash
         run: echo "version=$(sed -n 's/^__version__ = \"\(.*\)\"$/\1/p' vpeen/__init__.py)" >> "$GITHUB_OUTPUT"
 
-      # Linux: use the distro interpreter + distro Tk (Xft-enabled fonts)
+      # Linux: distro interpreter (the web GUI needs no GUI libs here;
+      # the frozen Linux build opens the UI in the default browser)
       - name: Setup Python (Linux)
         if: runner.os == 'Linux'
         run: |
           sudo apt-get update
-          sudo apt-get install -y python3-venv python3-tk
+          sudo apt-get install -y python3-venv
           python3 -m venv .venv
           .venv/bin/pip install --upgrade pip wheel
-          .venv/bin/pip install customtkinter==5.2.2 pillow pyinstaller
+          .venv/bin/pip install pyinstaller
 
       - name: Setup Python (Windows / macOS)
         if: runner.os != 'Linux'
@@ -54,7 +55,7 @@ jobs:
         if: runner.os != 'Linux'
         run: |
           python -m pip install --upgrade pip wheel
-          pip install customtkinter==5.2.2 pillow pyinstaller
+          pip install pywebview pyinstaller
 
       - name: Fetch tunnel binaries (macOS - both archs)
         if: runner.os == 'macOS'

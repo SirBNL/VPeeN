@@ -1,3 +1,4 @@
-# GUI dependencies (core proxy engine needs nothing but the standard library)
-customtkinter>=5.2.2,<6.0
-pillow>=10.0.0
+# GUI (optional): native desktop window for the web-based UI.
+# Without pywebview the app runs the same UI in your default browser.
+# The proxy core itself needs nothing but the standard library.
+pywebview>=5.1 ; sys_platform != "linux"
