@@ -17,7 +17,7 @@
 [![Release](https://img.shields.io/github/v/release/SirBNL/VPeeN?style=for-the-badge&labelColor=0e1526&color=00d68f)](../../releases)
 [![Stars](https://img.shields.io/github/stars/SirBNL/VPeeN?style=for-the-badge&labelColor=0e1526&color=ffcb2f)](../../stargazers)
 
-<img src="docs/demo.gif" alt="VPeeN Aurora UI — connect, switch locations, watch live traffic" width="88%"/>
+<img src="docs/demo.gif" alt="VPeeN Aurora UI — the aurora-dart cursor connects, watches the handshake, switches to Amsterdam, copies the exit IP and inspects live logs" width="88%"/>
 
 </div>
 

@@ -118,10 +118,17 @@ plus a real-network connect check).
 * `requirements.txt` now contains only the optional `pywebview`
   (non-Linux) — the core needs nothing.
 * Demo mode data includes countries; fresh `docs/` screenshots and a
-  re-recorded cinematic `docs/demo.gif` (~30 s, 16.7 fps): a premium
-  custom cursor glides through connect → location switch → logs with
-  natural bezier motion, live hover states and double-ring click
-  ripples — scripted CDP screencast of the final build.
+  re-recorded cinematic `docs/demo.gif` (~25 s, 20 fps, <9 MB): a
+  bespoke "aurora dart" cursor (white→mint gradient, teal rim glow,
+  comet trail) glides through connect → location switch → copy-IP →
+  logs with bezier arcs, live hover states and layered click ripples.
+  Recorded frame-by-frame under a virtual clock — every CSS transition
+  is stepped exactly one frame at a time and the /api feed is replayed
+  from a deterministic timeline, so the motion is perfectly smooth
+  (no dropped-frame stutter like a live screencast). The GIF itself is
+  written by a custom delta-encoder (`scripts/write_gif.py`) with
+  inter-frame transparency and motion-gated temporal stabilization —
+  roughly half the size of an ffmpeg palette encode at equal quality.
 * `pyflakes` stays clean; `python -m py_compile` across the tree.
 
 ## Verification
