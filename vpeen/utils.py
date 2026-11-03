@@ -1,6 +1,7 @@
 """Shared helpers: colored console output, state persistence, misc utils."""
 import json
 import os
+import stat
 import sys
 import tempfile
 import threading
@@ -96,7 +97,17 @@ class State:
     permissions are now explicit instead of accidental - the state file is
     written 0600 and a freshly created state directory is 0700 (POSIX).
     (mkstemp already produced 0600 by luck; this makes it a guarantee that
-    survives refactors, and locks the directory down too.)"""
+    survives refactors, and locks the directory down too.)
+
+    v4.3.1: LOST-UPDATE fix.  The GUI core thread and the quick-task
+    threads each own their OWN State instance over the same file.  A plain
+    whole-dump save from instance B (whose in-memory snapshot was loaded
+    before instance A wrote a token/udid) silently wiped A's keys.  Saves
+    now re-read the on-disk JSON first and merge in every key this
+    instance does not know about, so concurrent writers can no longer
+    clobber each other's top-level keys.  (Nothing in the codebase ever
+    deletes a state key, so adopting unknown on-disk keys is safe.)
+    """
 
     def __init__(self, path):
         self.path = path
@@ -117,6 +128,17 @@ class State:
                 d = os.path.dirname(self.path)
                 if d:
                     ensure_private_dir(d)     # private state directory
+                # v4.3.1: adopt keys written to disk by other State
+                # instances since we loaded (see class docstring).
+                try:
+                    with open(self.path, "r", encoding="utf-8") as f:
+                        on_disk = json.load(f)
+                    if isinstance(on_disk, dict):
+                        for k, v in on_disk.items():
+                            if k not in self.data:
+                                self.data[k] = v
+                except Exception:
+                    pass
                 fd, tmp = tempfile.mkstemp(prefix=".state-", suffix=".tmp",
                                            dir=d or ".")
                 try:
@@ -184,21 +206,30 @@ def now_ms() -> int:
 
 
 def ensure_private_dir(path: str) -> None:
-    """v1.3.0/v4.3.0: create `path` (with parents) as 0700 on POSIX.
+    """v1.3.0/v4.3.0/v4.3.1: create `path` (with parents) as 0700 on POSIX.
 
     Every directory that will hold sensitive files (state.json with the
     access token, tunnel journals, worker logs) must go through this
     instead of a bare os.makedirs, so the permissions stay tight no matter
     WHICH module creates the directory first (the state file itself is
-    already written 0600 by State.save)."""
+    already written 0600 by State.save).
+
+    v4.3.1: a directory that already EXISTS but is looser than 0700 (e.g.
+    ~/.vpeen created 0775 by a v4.2.x build before the hardening landed) is
+    now tightened too - previously only freshly created directories were
+    chmod-ed, so upgrade installs kept a group/world-readable ~/.vpeen
+    holding the token file forever.
+    """
     if not path:
         return
     try:
         created = not os.path.isdir(path)
         os.makedirs(path, exist_ok=True)
-        if created and os.name != "nt":
+        if os.name != "nt":
             try:
-                os.chmod(path, 0o700)
+                mode = stat.S_IMODE(os.stat(path).st_mode)
+                if created or (mode & 0o077):
+                    os.chmod(path, 0o700)
             except Exception:
                 pass
     except Exception:

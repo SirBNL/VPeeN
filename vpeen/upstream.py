@@ -14,14 +14,21 @@ v1.2 hardening:
 """
 import asyncio
 import base64
+import ipaddress
 import json
 import re
 import socket
 import ssl
 
-CHUNK = 65536
-
 from .api import USER_AGENT
+
+# v4.3.1: IPv6 exit IPs are recognised too (validated with ipaddress so
+# stray time-like or MAC-like tokens can never be mistaken for an IP).
+_IPV4_RE = re.compile(r"\b(\d{1,3}(?:\.\d{1,3}){3})\b")
+_IPV6_TOKEN_RE = re.compile(
+    r"\b([0-9A-Fa-f]{1,4}(?::[0-9A-Fa-f]{0,4}){2,7})\b")
+
+CHUNK = 65536
 
 # Hosts probed for the exit IP through a freshly opened tunnel.
 # v4.2.2: only api.ipify.org was queried; when it is slow or blocked the
@@ -263,11 +270,24 @@ async def _exit_ip_via(server: dict, echo_host: str, path: str,
             total += len(data)
         text = b"".join(chunks).decode("utf-8", errors="replace")
         body = text.split("\r\n\r\n", 1)[1] if "\r\n\r\n" in text else text
+        # v4.3.1: JSON answers first (both families), then regex fallbacks
+        # for plain-text mirrors - IPv6 included this time.
         try:
-            return json.loads(body.strip()).get("ip")
+            parsed = json.loads(body.strip())
+            if isinstance(parsed, dict) and parsed.get("ip"):
+                return str(parsed["ip"]).strip()
         except Exception:
-            m = re.search(r"\b(\d{1,3}(?:\.\d{1,3}){3})\b", body)
-            return m.group(1) if m else None
+            pass
+        m = _IPV4_RE.search(body)
+        if m:
+            return m.group(1)
+        m = _IPV6_TOKEN_RE.search(body)
+        if m:
+            try:
+                return str(ipaddress.ip_address(m.group(1)))
+            except ValueError:
+                pass
+        return None
     finally:
         try:
             writer.close()

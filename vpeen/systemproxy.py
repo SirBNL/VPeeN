@@ -105,6 +105,8 @@ def _mac_is_set(slot: dict) -> bool:
     port = str((slot or {}).get("port", ""))
     return bool(host) and host.lower() not in ("(null)", "-") and \
         port not in ("", "0")
+
+
 def _gnome_available():
     # v1.2.4 fix: operator precedence - the old "A and B or C" returned a
     # truthy WAYLAND string even without gsettings, then every gsettings
@@ -188,6 +190,14 @@ def system_on(state, host="127.0.0.1", http_port=8080, socks_port=1080):
                 ["networksetup", "-listallnetworkservices"],
                 capture_output=True, text=True, timeout=10
             ).stdout.strip().splitlines()[1:]
+            # v4.3.1: skip DISABLED services - networksetup marks them with
+            # a leading "*" and then rejects the starred name outright, so
+            # proxying "*Wi-Fi" failed while the real "Wi-Fi" was never
+            # reached (a machine with a disabled adapter first in the list
+            # got NO proxy at all).  Cap raised 3 -> 8 so VPN/VM adapters
+            # beyond the first three entries are covered too.
+            svc = [s.strip() for s in svc
+                   if s.strip() and not s.startswith("*")][:8]
             # v1.3.0: back up the FULL per-service proxy state (enabled,
             # host, port for web + secure-web) - the old backup stored only
             # the service NAMES, so system_off() blindly switched the HTTP
@@ -195,9 +205,9 @@ def system_on(state, host="127.0.0.1", http_port=8080, socks_port=1080):
             # configuration was silently destroyed instead of restored.
             detail = {s: {"web": _mac_read_proxy(s, "webproxy"),
                           "secure": _mac_read_proxy(s, "securewebproxy")}
-                      for s in svc[:3]}
+                      for s in svc}
             state.set(_state_backup_key(), {"services": svc, "detail": detail})
-            for s in svc[:3]:
+            for s in svc:
                 subprocess.run(["networksetup", "-setwebproxy", s, host, str(http_port)],
                                capture_output=True, timeout=15)
                 subprocess.run(["networksetup", "-setsecurewebproxy", s, host, str(http_port)],
@@ -288,7 +298,9 @@ def system_off(state):
             ok("macOS system proxy restored (original values).")
             return True
         # legacy backup (older version): only the service names were saved
-        for s in backup.get("services", [])[:3]:
+        for s in backup.get("services", [])[:8]:
+            if not isinstance(s, str) or not s.strip() or s.startswith("*"):
+                continue
             subprocess.run(["networksetup", "-setwebproxystate", s, "off"],
                            capture_output=True, timeout=15)
             subprocess.run(["networksetup", "-setsecurewebproxystate", s, "off"],

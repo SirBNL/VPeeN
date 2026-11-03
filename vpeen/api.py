@@ -19,9 +19,8 @@ The servers are HTTPS (CONNECT) proxies with basic auth.  The API rejects
 any other protocol value ("Protocol is invalid." for socks5).
 """
 import asyncio
-import base64
+import ipaddress
 import json
-import random
 import re
 import ssl
 import time
@@ -29,7 +28,7 @@ import urllib.request
 import urllib.error
 import uuid
 
-from .utils import State, err, info, local_timezone_name, now_ms, ok, warn
+from .utils import State, info, local_timezone_name, now_ms, ok
 
 APP_VERSION = "5.0.2"
 USER_AGENT = (
@@ -73,49 +72,11 @@ _API_DOMAIN_RE = re.compile(
     r"^https://(?:[A-Za-z0-9](?:[A-Za-z0-9-]*[A-Za-z0-9])?\.)+"
     r"[A-Za-z0-9](?:[A-Za-z0-9-]*[A-Za-z0-9])?(?::\d{1,5})?$")
 
-
-def valid_api_domain(url) -> bool:
-    """Strict validation for an API base domain.
-
-    v4.3.0: the reserve-domain buckets are public JSON files; the old check
-    (isinstance str + startswith("http")) accepted http:// and any junk a
-    hostile/compromised bucket served, and the Bearer token is sent in the
-    Authorization header of every request that follows.  Now a domain must
-    be https:// with a sane hostname (letters/digits/dots/hyphens, optional
-    port).  TLS certificate verification is still enforced by _ssl_context,
-    so an HTTPS domain we do not trust would fail the handshake rather than
-    leak the token."""
-    if not isinstance(url, str):
-        return False
-    u = url.strip().rstrip("/")
-    if not _API_DOMAIN_RE.match(u):
-        return False
-    # a port, when present, must be a real TCP port
-    rest = u[len("https://"):]
-    if ":" in rest:
-        try:
-            if not (0 < int(rest.rsplit(":", 1)[1]) < 65536):
-                return False
-        except ValueError:
-            return False
-    return True
-
-# v4.3.0 security/robustness hardening for the domain-rotation layer:
-# * every domain in the rotation is tried (the old fixed attempt counts of
-#   6/7 gave the 7 default domains a turn but the reserve domains fetched
-#   from the public buckets were NEVER reached - they existed only on paper);
-# * reserve domains are validated strictly (HTTPS + sane hostname) before
-#   they are ever appended, because the Bearer token is sent to every
-#   domain in this list;
-# * one request can never stall longer than REQUEST_BUDGET_SECONDS.
-MAX_DOMAIN_ATTEMPTS = 14        # 7 defaults + up to 7 reserve domains
-MAX_RESERVE_DOMAINS = 10
-REQUEST_BUDGET_SECONDS = 120
-API_TIMEOUT = 12                # per-HTTP-attempt socket timeout (was 20)
-
-_API_DOMAIN_RE = re.compile(
-    r"^https://(?:[A-Za-z0-9](?:[A-Za-z0-9-]*[A-Za-z0-9])?\.)+"
-    r"[A-Za-z0-9](?:[A-Za-z0-9-]*[A-Za-z0-9])?(?::\d{1,5})?$")
+# IP extraction fallbacks for plain-text echo services.  v4.3.1: a
+# separate IPv6 token pattern (then validated with ipaddress) so v6-only
+# networks stop reporting "could not determine your IP".
+_IPV4_RE = re.compile(r"\b(\d{1,3}(?:\.\d{1,3}){3})\b")
+_IPV6_TOKEN_RE = re.compile(r"\b([0-9A-Fa-f]{1,4}(?::[0-9A-Fa-f]{0,4}){2,7})\b")
 
 
 def valid_api_domain(url) -> bool:
@@ -126,9 +87,10 @@ def valid_api_domain(url) -> bool:
     hostile/compromised bucket served, and the Bearer token is sent in the
     Authorization header of every request that follows.  Now a domain must
     be https:// with a sane hostname (letters/digits/dots/hyphens, optional
-    port).  TLS certificate verification is still enforced by _ssl_context,
-    so an HTTPS domain we do not trust would fail the handshake rather than
-    leak the token."""
+    port).  TLS certificate verification is enforced by _http_request (the
+    default verified context; --insecure opts out explicitly), so an HTTPS
+    domain we do not trust fails the handshake rather than leaking the
+    token."""
     if not isinstance(url, str):
         return False
     u = url.strip().rstrip("/")
@@ -159,8 +121,16 @@ IP_ECHO_MIRRORS = [
 ]
 
 
-def _http_request(url, method="GET", headers=None, body=None, timeout=API_TIMEOUT):
-    """Blocking HTTP request returning (status, parsed_json_or_text)."""
+def _http_request(url, method="GET", headers=None, body=None,
+                  timeout=API_TIMEOUT, insecure=False):
+    """Blocking HTTP request returning (status, parsed_json_or_text).
+
+    v4.3.1: `insecure=True` ACTUALLY disables certificate verification for
+    this request.  The --insecure flag used to be stored on the VeePNApi
+    client but never reached urlopen - a VeePNApi._ssl_context() helper
+    existed and was referenced by docstrings, yet no call site used it, so
+    the flag silently did nothing for every API request (it only ever
+    affected the upstream CONNECT tunnels)."""
     req_headers = {
         "Accept": "application/json",
         "Content-Type": "application/json",
@@ -171,9 +141,16 @@ def _http_request(url, method="GET", headers=None, body=None, timeout=API_TIMEOU
     data = None
     if body is not None:
         data = json.dumps(body).encode("utf-8")
-    req = urllib.request.Request(url, data=data, headers=req_headers, method=method)
+    req = urllib.request.Request(url, data=data, headers=req_headers,
+                                  method=method)
+    extra = {}
+    if insecure:
+        ctx = ssl.create_default_context()
+        ctx.check_hostname = False
+        ctx.verify_mode = ssl.CERT_NONE
+        extra["context"] = ctx
     try:
-        with urllib.request.urlopen(req, timeout=timeout) as resp:
+        with urllib.request.urlopen(req, timeout=timeout, **extra) as resp:
             raw = resp.read().decode("utf-8", errors="replace")
             status = resp.status
     except urllib.error.HTTPError as e:
@@ -189,9 +166,9 @@ def _http_request(url, method="GET", headers=None, body=None, timeout=API_TIMEOU
 
 
 async def _http_request_async(url, method="GET", headers=None, body=None,
-                              timeout=API_TIMEOUT):
+                              timeout=API_TIMEOUT, insecure=False):
     return await asyncio.to_thread(
-        _http_request, url, method, headers, body, timeout
+        _http_request, url, method, headers, body, timeout, insecure
     )
 
 
@@ -217,13 +194,6 @@ class VeePNApi:
             udid = str(uuid.uuid4())
             self.state.set("udid", udid)
         return udid
-
-    def _ssl_context(self):
-        ctx = ssl.create_default_context()
-        if self.insecure_tls:
-            ctx.check_hostname = False
-            ctx.verify_mode = ssl.CERT_NONE
-        return ctx
 
     async def _request(self, path, method="GET", body=None, auth=True,
                        attempts=None):
@@ -258,7 +228,8 @@ class VeePNApi:
             url = domain.rstrip("/") + path
             try:
                 status, payload = await _http_request_async(
-                    url, method=method, body=body, headers=headers
+                    url, method=method, body=body, headers=headers,
+                    insecure=self.insecure_tls,
                 )
             except OSError as e:
                 last_error = f"{domain} unreachable ({e})"
@@ -321,7 +292,8 @@ class VeePNApi:
         found = []
         for bucket in RESERVE_BUCKET_URLS:
             try:
-                status, payload = await _http_request_async(bucket, timeout=15)
+                status, payload = await _http_request_async(
+                    bucket, timeout=15, insecure=self.insecure_tls)
                 if status == 200 and isinstance(payload, dict):
                     d = payload.get("domains") or {}
                     for url in (d.get("free") or []):
@@ -375,7 +347,8 @@ class VeePNApi:
             url = domain.rstrip("/") + "/v3/launch/"
             try:
                 status, payload = await _http_request_async(
-                    url, method="POST", body=body
+                    url, method="POST", body=body,
+                    insecure=self.insecure_tls,
                 )
             except OSError as e:
                 last = f"{domain}: {e}"
@@ -448,7 +421,8 @@ class VeePNApi:
         turn with a short timeout each."""
         for mirror in IP_ECHO_MIRRORS:
             try:
-                status, payload = await _http_request_async(mirror, timeout=6)
+                status, payload = await _http_request_async(
+                    mirror, timeout=6, insecure=self.insecure_tls)
                 if status != 200:
                     continue
                 if isinstance(payload, dict):
@@ -456,10 +430,23 @@ class VeePNApi:
                     if ip:
                         return str(ip).strip()
                 elif isinstance(payload, str) and payload.strip():
-                    m = re.search(r"\b(\d{1,3}(?:\.\d{1,3}){3})\b",
-                                  payload.strip())
+                    s = payload.strip()
+                    # v4.3.1: recognise IPv6 answers too (ifconfig.me and
+                    # friends return them on v6-only networks; the old
+                    # IPv4-only regex reported 'unknown IP' forever).
+                    try:
+                        return str(ipaddress.ip_address(s))
+                    except ValueError:
+                        pass
+                    m = _IPV4_RE.search(s)
                     if m:
                         return m.group(1)
+                    m = _IPV6_TOKEN_RE.search(s)
+                    if m:
+                        try:
+                            return str(ipaddress.ip_address(m.group(1)))
+                        except ValueError:
+                            pass
             except Exception:
                 continue
         return None

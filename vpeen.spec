@@ -7,9 +7,20 @@ right set.  Run scripts/fetch-binaries.py first.
 """
 import os
 import platform
+import re
 import sys
 
 from PyInstaller.utils.hooks import collect_all
+
+# v4.3.1: read the real version from vpeen/__init__.py.  The macOS bundle
+# used to carry a HARD-CODED "4.2.2" while the app itself was 4.3.0 -
+# Finder/About showed a stale version for two releases straight.
+_version = "0.0.0"
+with open(os.path.join("vpeen", "__init__.py"), "r", encoding="utf-8") as _f:
+    _m = re.search(r'^__version__\s*=\s*["\']([^"\']+)["\']', _f.read(), re.M)
+    if _m:
+        _version = _m.group(1)
+print(f"VPeeN bundle version: {_version}")
 
 datas, binaries, hidden = [], [], []
 for pkg in ("customtkinter",):
@@ -124,8 +135,8 @@ if sys.platform == "darwin":
         info_plist={
             "CFBundleName": "VPeeN",
             "CFBundleDisplayName": "VPeeN",
-            "CFBundleShortVersionString": "4.2.2",
-            "CFBundleVersion": "4.2.2",
+            "CFBundleShortVersionString": _version,
+            "CFBundleVersion": _version,
             "NSHighResolutionCapable": True,
             "LSMinimumSystemVersion": "10.13",
         },

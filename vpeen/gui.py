@@ -18,7 +18,7 @@ from PIL import Image, ImageDraw, ImageTk
 from . import __app_name__, __version__
 from . import settings as cfgmod
 from .cli import validate_bind_security
-from .core import Core, PHASE_CONNECTING, spawn_quick_task
+from .core import Core, spawn_quick_task
 
 # ------------------------------------------------------------------ palette
 WHITE = "#ffffff"
@@ -472,7 +472,10 @@ class VPeeNApp(ctk.CTk):
             row1, text="", width=44, progress_color=ORANGE,
             button_color=WHITE, button_hover_color="#f2f2f2",
             fg_color=TRACK, command=self._on_proxy_toggle)
-        self.sw_proxy.select() if self.cfg.get("auto_system_proxy") else None
+        # v4.3.1: plain statement instead of the old
+        # "select() if cfg else None" expression-in-statement trick.
+        if self.cfg.get("auto_system_proxy"):
+            self.sw_proxy.select()
         self.sw_proxy.pack(side="left")
 
         row2 = ctk.CTkFrame(hero, fg_color="transparent")
@@ -684,7 +687,6 @@ class VPeeNApp(ctk.CTk):
         c.delete("all")
         self._row_geo = []
         rows = self._visible_rows()
-        free_n = sum(1 for r in self.loc_rows if r["free"])
         self.lbl_count.configure(text=("-" if not self.loc_rows else
                                        f"{len(rows)} of {len(self.loc_rows)}"
                                        " locations"))
@@ -894,8 +896,15 @@ class VPeeNApp(ctk.CTk):
             http_port = int(self.cfg.get("http_port", 8080))
             if not (0 < socks_port < 65536 and 0 < http_port < 65536):
                 raise ValueError
+            # v4.3.1: equal ports made the second listener fail with
+            # "address already in use" only at CONNECT time, deep inside
+            # the core thread - validate here for an immediate, readable
+            # error instead.
+            if socks_port == http_port:
+                raise ValueError
         except ValueError:
-            self._log_line("Invalid ports - check Settings.", "err")
+            self._log_line("Invalid ports (must differ and be 1-65535) - "
+                           "check Settings.", "err")
             return
         want_tunnel = bool(self.sw_tunnel.get())
         region = self.loc_selected
@@ -1271,8 +1280,14 @@ class VPeeNApp(ctk.CTk):
             if not (0 < socks_port < 65536 and 0 < http_port < 65536
                     and 500 <= mtu <= 65000):
                 raise ValueError
+            # v4.3.1: two listeners can never share one port - reject at
+            # save time instead of failing deep inside the core at connect.
+            if socks_port == http_port:
+                raise ValueError
         except ValueError:
-            self._log_line("Invalid values - settings not saved.", "err")
+            self._log_line("Invalid values (ports must differ; ports "
+                           "1-65535; MTU 500-65000) - settings not saved.",
+                           "err")
             return
         # v4.3.0: the bind address is validated for real (it used to be a
         # dead setting).  The GUI is loopback-only - an open LAN proxy needs
@@ -1391,6 +1406,10 @@ class VPeeNApp(ctk.CTk):
             if ph == "connected" and self.pending_tunnel:
                 # wait for the tunnel event to finalize the UI
                 self.phase = "connecting"
+                # v4.3.1: consume the flag - it used to stay True for the
+                # rest of the session, so any later "phase: connected"
+                # re-issued a SECOND tunnel connect (double worker spawn).
+                self.pending_tunnel = False
                 self._connect_tunnel()
                 return
             if ph == "connected" and self.conn_mode == "tunnel":

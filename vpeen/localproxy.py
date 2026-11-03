@@ -336,11 +336,25 @@ async def _tunnel(client_writer, upstream_writer,
                 if outcome == "error":
                     aborted = True
                     continue
-                # clean EOF from one side -> half-close the other writer
+                # clean EOF from one side -> half-close the other writer.
+                # v4.3.1: asyncio SSL transports CANNOT half-close
+                # (write_eof() raises NotImplementedError, see
+                # can_write_eof()).  The old code caught that exception
+                # and hard-aborted the tunnel, which CANCELLED the
+                # still-draining opposite direction - so any client that
+                # half-closed its socket (shutdown(SHUT_WR): nc, some
+                # HTTP clients, test harnesses) lost whatever the server
+                # was still sending back.  The "full TCP half-close
+                # semantics" advertised above never actually worked
+                # through the TLS upstream.  Now we half-close only when
+                # the transport supports it; otherwise that direction
+                # simply stays open and the tunnel still ends when the
+                # other side finishes or errors.
                 target = upstream_writer if t is up else client_writer
                 try:
-                    target.write_eof()
-                    await target.drain()
+                    if target.can_write_eof():
+                        target.write_eof()
+                        await target.drain()
                 except Exception:
                     aborted = True
 

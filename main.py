@@ -18,10 +18,20 @@ def _install_run_log() -> None:
     happens - import errors, GUI crashes, thread exceptions - ends up in
     a file the user can send.  It must NEVER break the app, so every
     failure inside here is swallowed.
+
+    v4.3.1: the elevated tunnel worker / cleanup helper write to a SEPARATE
+    last-run-worker.log.  They used to open the GUI's last-run.log with
+    mode "w", silently truncating the GUI's crash log every time tunnel
+    mode started - and the two processes then interleaved their writes at
+    clashing offsets.
     """
     try:
         from vpeen.utils import ensure_private_dir
-        path = os.path.join(os.path.expanduser("~"), ".vpeen", "last-run.log")
+        argv = sys.argv[1:]
+        role = "worker" if ("--tunnel-worker" in argv
+                            or "--tunnel-cleanup" in argv) else ""
+        fname = f"last-run-{role}.log" if role else "last-run.log"
+        path = os.path.join(os.path.expanduser("~"), ".vpeen", fname)
         # v4.3.0: the log dir must be private too - this bare makedirs was
         # the FIRST creator of ~/.vpeen, before State/settings could chmod
         ensure_private_dir(os.path.dirname(path))
@@ -116,7 +126,6 @@ def _install_run_log() -> None:
         f.flush()
     except Exception:
         pass
-
     try:
         sys.stdout = _Tee(console_out)
         sys.stderr = _Tee(console_err)

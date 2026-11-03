@@ -23,6 +23,13 @@ import subprocess
 import tempfile
 import time
 
+# v4.3.1 CRITICAL FIX: save_session() and _linux_dns_swap() call
+# ensure_private_dir(), but the import was missing - every bring_up() on
+# every platform raised NameError AFTER the routes had been applied, the
+# session journal (crash-recovery keystone) was never written, and tunnel
+# mode could only ever "fail" back to proxy mode.
+from .utils import ensure_private_dir
+
 TUN_NAME = {"win32": "VPeeN", "linux": "vpeen0", "darwin": "utun9"}
 TUN_IP = "198.18.0.1"
 TUN_MASK = "255.255.255.0"
@@ -462,7 +469,9 @@ def _mac_services():
 def _mac_dns_set(services):
     """Swap DNS on all services to the TUN resolver; journal old values."""
     journal = []
-    for svc in services[:5]:
+    # v4.3.1: 5 -> 8 services (machines with VPN/VM adapters routinely
+    # expose more than five); the journal keeps restore exact either way.
+    for svc in services[:8]:
         rc, out, _ = run(["networksetup", "-getdnsservers", svc])
         old = out if rc == 0 and out and "There aren't" not in out else ""
         rc2, _, err = run(["networksetup", "-setdnsservers", svc, TUN_IP])

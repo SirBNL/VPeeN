@@ -10,7 +10,6 @@ import platform
 import signal
 import sys
 
-from . import __version__
 from .api import ApiError, VeePNApi
 from .localproxy import LocalProxyServer, Stats, TunnelFactory
 from .systemproxy import system_off, system_on
@@ -488,7 +487,13 @@ def main(argv=None):
     argv = argv if argv is not None else sys.argv[1:]
     if not argv:
         return asyncio.run(interactive(_interactive_args()))
-    args = build_parser().parse_args(argv)
+    parser = build_parser()
+    args = parser.parse_args(argv)
+    # v4.3.1: "vpeen --state x" (global flags but NO subcommand) used to
+    # exit silently with code 0 and print nothing at all.
+    if not args.cmd:
+        parser.print_help()
+        return 2
     try:
         if args.cmd == "list":
             return asyncio.run(cmd_list(args))

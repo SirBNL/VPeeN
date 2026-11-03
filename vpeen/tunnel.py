@@ -154,8 +154,18 @@ class TunnelWorker:
     async def _on_client(self, reader, writer):
         try:
             first = await asyncio.wait_for(reader.readline(), 10)
-            hello = json.loads(first)
-            if hello.get("auth") != self.ctl_token:
+            # v4.3.1: a garbage/empty first line used to raise an UNCAUGHT
+            # ValueError (JSONDecodeError) or AttributeError (non-dict JSON)
+            # inside the connection callback - asyncio then logged a scary
+            # "exception in callback" traceback for every bad probe that
+            # touched the control port.
+            try:
+                hello = json.loads(first)
+            except ValueError:
+                writer.close()
+                return
+            if not isinstance(hello, dict) or \
+                    hello.get("auth") != self.ctl_token:
                 writer.close()
                 return
             await self._send(writer, {"ev": "hello"})
@@ -854,6 +864,19 @@ class TunnelController:
 
 
 # ------------------------------------------------------------ worker entry
+def _arg_value(argv, flag, default=None):
+    """v4.3.1: safe flag lookup - argv.index(flag) + 1 raised IndexError
+    whenever a --ctl-port/--ctl-token/--session flag arrived without its
+    value (e.g. a truncated command line from an elevation prompt)."""
+    try:
+        i = argv.index(flag)
+    except ValueError:
+        return default
+    if i + 1 < len(argv):
+        return argv[i + 1]
+    return default
+
+
 def _worker_main(ctl_port: int, ctl_token: str) -> int:
     # The elevated worker runs the DNS relay (UDP datagram endpoints), which
     # is fragile/unsupported on the default Windows ProactorEventLoop.
@@ -888,12 +911,14 @@ def _cleanup_main(session_path: str) -> int:
 def main(argv=None) -> int:
     argv = argv if argv is not None else sys.argv[1:]
     if "--tunnel-worker" in argv:
-        port = int(argv[argv.index("--ctl-port") + 1]) if "--ctl-port" in argv else 0
-        token = argv[argv.index("--ctl-token") + 1] if "--ctl-token" in argv else ""
+        try:
+            port = int(_arg_value(argv, "--ctl-port", "0"))
+        except ValueError:
+            port = 0
+        token = _arg_value(argv, "--ctl-token", "")
         return _worker_main(port, token)
     if "--tunnel-cleanup" in argv:
-        path = argv[argv.index("--session") + 1] if "--session" in argv else \
-            plat.SESSION_PATH
+        path = _arg_value(argv, "--session", plat.SESSION_PATH)
         return _cleanup_main(path)
     print("usage: python -m vpeen.tunnel --tunnel-worker --ctl-port N "
           "--ctl-token T [--tunnel-cleanup --session P]")

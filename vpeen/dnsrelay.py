@@ -157,19 +157,31 @@ class DNSRelay:
                         pass
         raise OSError(f"all resolvers failed ({last_err})")
 
-    async def resolve(self, query: bytes) -> bytes:
-        """Full query -> response (used by UDP and TCP paths)."""
+    async def resolve(self, query: bytes, udp: bool = False) -> bytes:
+        """Full query -> response (used by UDP and TCP paths).
+
+        v4.3.1: `udp=True` (the datagram path) truncates oversized
+        responses to a TC-flagged 512-byte stub so the client retries over
+        TCP, as RFC 1035 intends.  The TCP path must return the response
+        WHOLE - the old code truncated for TCP clients too, so any answer
+        over ~1200 bytes (DNSSEC, large record sets) was corrupted for
+        DNS-over-TCP clients even though the full response was in cache.
+        """
         self._queries += 1
         key = self._question_key(query)
         cached = self._cache_get(key)
         if cached is not None:
             # rewrite the transaction ID so the stub accepts the reply
-            return query[:2] + cached[2:]
+            resp = query[:2] + cached[2:]
+            if udp and len(resp) > UDP_REPLY_SAFE:
+                resp = _set_tc(resp[:512])
+            return resp
         resp = await self._relay_tcp_dns(query)
         self._cache_put(key, resp)
-        # big responses can't travel back over UDP safely -> ask stub to retry
-        # TCP (cache the FULL response first - TCP clients must get it whole)
-        if len(resp) > UDP_REPLY_SAFE:
+        # big responses can't travel back over UDP safely -> ask stub to
+        # retry over TCP (cache keeps the FULL response; TCP clients get
+        # it whole, UDP clients get the TC stub)
+        if udp and len(resp) > UDP_REPLY_SAFE:
             resp = _set_tc(resp[:512])
         return resp
 
@@ -231,7 +243,7 @@ class _UDPProto(asyncio.DatagramProtocol):
         if len(data) < 12 or len(data) > 9000:
             return
         try:
-            resp = await self.relay.resolve(data)
+            resp = await self.relay.resolve(data, udp=True)
         except OSError:
             resp = _servfail(data)
         try:
