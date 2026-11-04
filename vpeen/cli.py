@@ -11,7 +11,8 @@ import signal
 import sys
 
 from .api import ApiError, VeePNApi
-from .localproxy import LocalProxyServer, Stats, TunnelFactory
+from .localproxy import (READ_LIMIT, LocalProxyServer, Stats,
+                         TunnelFactory)
 from .systemproxy import system_off, system_on
 from .upstream import check_exit_ip
 from .utils import (C, State, banner, dim, ensure_utf8_console, err, info, ok,
@@ -253,7 +254,10 @@ async def cmd_run(args):
     auth = (user, pwd) if (user and pwd) else None
     stats = Stats()
     factory = TunnelFactory(api, servers, insecure_tls=getattr(args, "insecure", False),
-                            on_refresh=None)
+                            on_refresh=None,
+                            log=lambda msg, lvl="info": dim(f"  [{lvl}] {msg}"))
+    # v4.5.0 "Velocity": latency-rank the servers and pre-warm TLS conns
+    factory.start_latency_probe()
     proxy = LocalProxyServer(factory, stats, auth=auth)
 
     # --- explicit client-task registry: every handler task is tracked so we
@@ -280,8 +284,10 @@ async def cmd_run(args):
     def http_client_cb(r, w):
         _spawn(proxy.handle_http(r, w))
 
-    socks_srv = await asyncio.start_server(socks_client_cb, bind, socks_port)
-    http_srv = await asyncio.start_server(http_client_cb, bind, http_port)
+    socks_srv = await asyncio.start_server(socks_client_cb, bind, socks_port,
+                                            limit=READ_LIMIT)
+    http_srv = await asyncio.start_server(http_client_cb, bind, http_port,
+                                          limit=READ_LIMIT)
     _print_running(bind, socks_port, http_port, region, auth=auth)
     if auth:
         info("Proxy authentication is ON - clients must supply the "

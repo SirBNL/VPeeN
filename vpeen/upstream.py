@@ -16,9 +16,11 @@ import asyncio
 import base64
 import ipaddress
 import json
+import os
 import re
 import socket
 import ssl
+import time
 
 from .api import USER_AGENT
 
@@ -29,6 +31,65 @@ _IPV6_TOKEN_RE = re.compile(
     r"\b([0-9A-Fa-f]{1,4}(?::[0-9A-Fa-f]{0,4}){2,7})\b")
 
 CHUNK = 65536
+
+# v4.5.0 "Velocity" perf pass -------------------------------------------------
+# 256 KiB StreamReader limit for upstream/client connections: bigger reads
+# mean fewer event-loop iterations and larger socket writes, which
+# measurably lifts throughput on high-bandwidth x high-latency paths
+# (the 64 KiB default caps in-flight data at window size, not link speed).
+READ_LIMIT = 262144
+
+# Happy-Eyeballs stagger (RFC 8305 style) between a server's addresses:
+# the first address connects immediately, each extra one 250 ms later -
+# a blackholed first address costs 250 ms instead of the full timeout.
+RACE_STAGGER = 0.25
+
+# Cached SSL contexts (one per verify mode).  Building a context reloads
+# the whole system CA bundle - tens of ms on Windows per connection - and
+# was previously done for EVERY upstream connect.
+_SSL_CTX_CACHE: "dict[bool, ssl.SSLContext]" = {}
+
+# Socket buffers for Windows (Linux autotunes better WITHOUT an explicit
+# SO_RCVBUF/SO_SNDBUF, which would cap it, so this is nt-only).
+_WIN_BUF = 512 * 1024
+
+
+def _ssl_context(insecure: bool = False) -> ssl.SSLContext:
+    ctx = _SSL_CTX_CACHE.get(insecure)
+    if ctx is None:
+        ctx = ssl.create_default_context()
+        if insecure:
+            ctx.check_hostname = False
+            ctx.verify_mode = ssl.CERT_NONE
+        _SSL_CTX_CACHE[insecure] = ctx
+    return ctx
+
+
+def _tune_transport(writer) -> None:
+    """Best-effort socket tuning on a freshly established transport:
+    explicit TCP_NODELAY (asyncio normally sets it, but make it
+    contractual) and bigger buffers on Windows, whose defaults are small
+    for long-fat pipes."""
+    if writer is None:
+        return
+    try:
+        sock = writer.get_extra_info("socket")
+        if sock is None:
+            return
+        try:
+            sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+        except (OSError, AttributeError):
+            pass
+        if os.name == "nt":
+            for opt in (socket.SO_RCVBUF, socket.SO_SNDBUF):
+                try:
+                    if sock.getsockopt(socket.SOL_SOCKET, opt) < _WIN_BUF:
+                        sock.setsockopt(socket.SOL_SOCKET, opt, _WIN_BUF)
+                except (OSError, AttributeError):
+                    pass
+    except Exception:
+        pass
+
 
 # Hosts probed for the exit IP through a freshly opened tunnel.
 # v4.2.2: only api.ipify.org was queried; when it is slow or blocked the
@@ -113,90 +174,267 @@ def enable_keepalive(writer, idle_hint=45):
         pass
 
 
+async def _single_tls(host: str, port: int, ctx: ssl.SSLContext,
+                      timeout: float, limit: int):
+    """One TCP+TLS connect attempt to a single proxy address."""
+    return await asyncio.wait_for(
+        asyncio.open_connection(host, port, ssl=ctx,
+                                server_hostname=host, limit=limit),
+        timeout=timeout,
+    )
+
+
+async def _race_tls(addresses, port: int, ctx: ssl.SSLContext,
+                    timeout: float, limit: int):
+    """Happy-Eyeballs (RFC 8305 style) across a server's addresses.
+
+    Attempt #1 starts immediately; each further address starts RACE_STAGGER
+    seconds after the previous one.  The FIRST fully established TLS
+    connection wins and the stragglers are cancelled, so one blackholed
+    address costs a 250 ms stagger instead of the whole connect timeout
+    (the old sequential loop paid up to N x timeout in the worst case).
+
+    Returns (reader, writer, host) of the winner.
+    Raises the first observed error if every attempt fails (or the last
+    error seen - the most recent one is the most informative).
+    """
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + timeout
+
+    async def _staggered(i: int, host: str):
+        if i:
+            await asyncio.sleep(RACE_STAGGER * i)
+            if loop.time() >= deadline:
+                raise asyncio.TimeoutError()
+        left = max(0.05, deadline - loop.time())
+        return await _single_tls(host, port, ctx, left, limit)
+
+    tasks = [asyncio.ensure_future(_staggered(i, h))
+             for i, h in enumerate(addresses)]
+    last_exc: Exception | None = None
+    try:
+        pending = set(tasks)
+        while pending:
+            left = deadline - loop.time()
+            if left <= 0:
+                for t in pending:
+                    t.cancel()
+                await asyncio.gather(*pending, return_exceptions=True)
+                raise last_exc or asyncio.TimeoutError()
+            done, pending = await asyncio.wait(
+                pending, return_when=asyncio.FIRST_COMPLETED, timeout=left)
+            for t in done:
+                if t.cancelled():
+                    continue
+                exc = t.exception()
+                if exc is None:
+                    winner = t
+                    # first success wins -> cancel the rest
+                    for other in pending:
+                        other.cancel()
+                    await asyncio.gather(*pending, return_exceptions=True)
+                    reader, writer = winner.result()
+                    return reader, writer, addresses[tasks.index(winner)]
+                last_exc = exc
+        raise last_exc or UpstreamError("all addresses failed")
+    except UpstreamError:
+        raise
+    except asyncio.CancelledError:
+        for t in tasks:
+            if not t.done():
+                t.cancel()
+        raise
+    finally:
+        # belt and suspenders: never leave a straggler behind
+        for t in tasks:
+            if not t.done():
+                t.cancel()
+
+
+async def tls_connect(server: dict, insecure_tls: bool = False,
+                      connect_timeout: float = 10.0,
+                      limit: int = READ_LIMIT):
+    """
+    Establish TCP + TLS to the VeePN proxy server (NO CONNECT yet).
+
+    Split out of connect_via_server in v4.5.0 so the local proxy can keep
+    a pool of pre-warmed TLS connections: with a warm connection a client
+    CONNECT costs a single round-trip instead of TCP + full TLS handshake
+    + CONNECT (~3 RTTs) on every single proxied connection.
+
+    Uses the cached SSL context (no CA-bundle reload per connection) and
+    races the server's addresses Happy-Eyeballs style.
+
+    Returns (reader, writer).
+    """
+    addresses = server.get("addresses") or []
+    port = int(server.get("port") or 0)
+    if not addresses or not port:
+        raise UpstreamError("Malformed server entry")
+
+    ctx = _ssl_context(insecure_tls)
+    if len(addresses) == 1:
+        try:
+            reader, writer = await _single_tls(addresses[0], port, ctx,
+                                               connect_timeout, limit)
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:
+            kind = ("handshake timeout" if isinstance(e, asyncio.TimeoutError)
+                    else e)
+            raise UpstreamError(
+                f"Cannot reach upstream proxy {addresses}:{port}: {kind}",
+                SOCK_ERRORS["host_unreachable"],
+            )
+    else:
+        try:
+            reader, writer, _host = await _race_tls(
+                addresses, port, ctx, connect_timeout, limit)
+        except UpstreamError:
+            raise
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:
+            kind = ("handshake timeout" if isinstance(e, asyncio.TimeoutError)
+                    else e)
+            raise UpstreamError(
+                f"Cannot reach upstream proxy {addresses}:{port}: {kind}",
+                SOCK_ERRORS["host_unreachable"],
+            )
+    _tune_transport(writer)
+    enable_keepalive(writer)
+    return reader, writer
+
+
+async def send_connect(reader, writer, server: dict,
+                       target_host: str, target_port: int,
+                       connect_timeout: float = 10.0):
+    """
+    Issue `CONNECT host:port` with the server's credentials on an
+    established TLS connection and return (reader, writer) of the tunnel
+    once the proxy answers 200.
+
+    Raises UpstreamError (with .status where parseable) otherwise; the
+    caller owns closing the connection on failure.
+    """
+    username = server.get("username") or ""
+    password = server.get("password") or ""
+    target = _fmt_target(target_host)
+
+    auth = base64.b64encode(f"{username}:{password}".encode()).decode()
+    req = (
+        f"CONNECT {target}:{target_port} HTTP/1.1\r\n"
+        f"Host: {target}:{target_port}\r\n"
+        f"Proxy-Authorization: Basic {auth}\r\n"
+        f"User-Agent: {USER_AGENT}\r\n"
+        f"Proxy-Connection: keep-alive\r\n\r\n"
+    )
+    writer.write(req.encode("latin-1"))
+    await asyncio.wait_for(writer.drain(), timeout=connect_timeout)
+
+    # status line with its own deadline - a silent proxy must not
+    # hold the client connection hostage
+    status_line = (await asyncio.wait_for(
+        reader.readline(), timeout=connect_timeout)
+    ).decode("latin-1", errors="replace")
+    # consume response headers
+    while True:
+        line = await asyncio.wait_for(reader.readline(),
+                                      timeout=connect_timeout)
+        if line in (b"\r\n", b"\n", b""):
+            break
+    if " 200" in status_line:
+        return reader, writer
+    code, status = _classify_connect_failure(status_line)
+    raise UpstreamError(
+        f"Upstream CONNECT failed: {status_line.strip()}",
+        code, status,
+    )
+
+
 async def connect_via_server(server: dict, target_host: str, target_port: int,
                              insecure_tls: bool = False,
-                             connect_timeout: float = 10.0):
+                             connect_timeout: float = 10.0,
+                             limit: int = READ_LIMIT):
     """
     Open a TLS connection to the VeePN proxy server, issue CONNECT and return
     (reader, writer) of the tunnel once the proxy answers 200.
 
     `server` is one entry from the /v3/server/list/ response:
         {addresses: [..], port: int, username: str, password: str, ...}
+
+    v4.5.0: composed of tls_connect() + send_connect() so pre-warmed
+    connections can skip straight to the CONNECT step; behaviour and
+    error taxonomy are unchanged for existing callers.
     """
-    addresses = server.get("addresses") or []
-    port = int(server.get("port") or 0)
-    username = server.get("username") or ""
-    password = server.get("password") or ""
-    if not addresses or not port:
-        raise UpstreamError("Malformed server entry")
-
-    target = _fmt_target(target_host)
-    last_exc = None
-    for host in addresses:
-        writer = None
+    reader, writer = await tls_connect(server, insecure_tls=insecure_tls,
+                                       connect_timeout=connect_timeout,
+                                       limit=limit)
+    try:
+        return await send_connect(reader, writer, server, target_host,
+                                  target_port,
+                                  connect_timeout=connect_timeout)
+    except Exception:
         try:
-            ssl_ctx = ssl.create_default_context()
-            if insecure_tls:
-                ssl_ctx.check_hostname = False
-                ssl_ctx.verify_mode = ssl.CERT_NONE
-            reader, writer = await asyncio.wait_for(
-                asyncio.open_connection(host, port, ssl=ssl_ctx,
-                                        server_hostname=host),
-                timeout=connect_timeout,
-            )
-            auth = base64.b64encode(f"{username}:{password}".encode()).decode()
-            req = (
-                f"CONNECT {target}:{target_port} HTTP/1.1\r\n"
-                f"Host: {target}:{target_port}\r\n"
-                f"Proxy-Authorization: Basic {auth}\r\n"
-                f"User-Agent: {USER_AGENT}\r\n"
-                f"Proxy-Connection: keep-alive\r\n\r\n"
-            )
-            writer.write(req.encode("latin-1"))
-            await asyncio.wait_for(writer.drain(), timeout=connect_timeout)
+            writer.close()
+        except Exception:
+            pass
+        raise
 
-            # status line with its own deadline - a silent proxy must not
-            # hold the client connection hostage
-            status_line = (await asyncio.wait_for(
-                reader.readline(), timeout=connect_timeout)
-            ).decode("latin-1", errors="replace")
-            # consume response headers
-            while True:
-                line = await asyncio.wait_for(reader.readline(),
-                                              timeout=connect_timeout)
-                if line in (b"\r\n", b"\n", b""):
-                    break
-            if " 200" in status_line:
-                enable_keepalive(writer)
-                return reader, writer
+
+async def probe_server_latency(servers, budget: float = 1.5,
+                               max_per_server: int = 1):
+    """
+    Concurrent plain-TCP RTT probe of the servers (v4.5.0).
+
+    Returns {index: milliseconds} for every server that answered within
+    `budget`; unresponsive/failed servers are simply absent.  Used to
+    latency-rank the server list (sticky fastest-first) and to give the
+    GUI an honest per-region number measured against the region's BEST
+    server, not just its first entry.
+    """
+    async def one(idx: int, srv: dict):
+        addresses = srv.get("addresses") or []
+        port = int(srv.get("port") or 0)
+        hosts = [a for a in addresses[:max_per_server] if a]
+        if not hosts or not port:
+            return idx, None
+        best = None
+        for host in hosts:
+            t0 = time.monotonic()
+            writer = None
             try:
-                writer.close()
+                _r, writer = await asyncio.wait_for(
+                    asyncio.open_connection(host, port), budget)
+                ms = (time.monotonic() - t0) * 1000.0
+                best = ms if best is None else min(best, ms)
             except Exception:
                 pass
-            code, status = _classify_connect_failure(status_line)
-            raise UpstreamError(
-                f"Upstream CONNECT failed: {status_line.strip()}",
-                code, status,
-            )
-        except UpstreamError:
-            raise
-        except asyncio.CancelledError:
-            raise
-        except Exception as e:  # TLS / DNS / timeout -> try next address
-            last_exc = e
-            if writer is not None:
-                try:
-                    writer.close()
-                except Exception:
-                    pass
+            finally:
+                if writer is not None:
+                    try:
+                        writer.close()
+                    except Exception:
+                        pass
+            if best is not None:
+                break          # first reachable address is enough to rank
+        return idx, best
+
+    tasks = [asyncio.ensure_future(one(i, s)) for i, s in enumerate(servers)]
+    if not tasks:
+        return {}
+    await asyncio.wait(tasks, timeout=budget + 0.5)
+    out = {}
+    for t in tasks:
+        if t.cancelled():
             continue
-    # str(TimeoutError()) is empty on Python 3.11+, so tag it explicitly
-    kind = ("handshake timeout" if isinstance(last_exc, asyncio.TimeoutError)
-            else last_exc)
-    raise UpstreamError(
-        f"Cannot reach upstream proxy {addresses}:{port}: {kind}",
-        SOCK_ERRORS["host_unreachable"],
-    )
+        exc = t.exception()
+        if exc is not None:
+            continue
+        idx, ms = t.result()
+        if ms is not None:
+            out[idx] = int(ms)
+    return out
 
 
 async def check_exit_ip(server: dict, insecure_tls: bool = False,

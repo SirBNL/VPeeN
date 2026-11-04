@@ -40,10 +40,11 @@ import struct
 import time
 from urllib.parse import urlsplit
 
-from .upstream import (SOCK_ERRORS, UpstreamError, connect_via_server,
-                       enable_keepalive)
+from .upstream import (READ_LIMIT, SOCK_ERRORS, UpstreamError,
+                       connect_via_server, enable_keepalive, probe_server_latency,
+                       send_connect, tls_connect)
 
-CHUNK = 65536
+CHUNK = 262144              # v4.5.0: 256 KiB relay chunks (was 64 KiB)
 HANDSHAKE_TIMEOUT = 30        # per-phase client handshake budget
 BODY_TIMEOUT = 600            # budget for streaming a request body upstream
 MAX_REQUEST_BODY = 128 * 1024 * 1024   # plain-HTTP re-encode safety cap
@@ -53,6 +54,17 @@ COOLDOWN_BASE = 20            # first failure cooldown (seconds)
 COOLDOWN_MAX = 600            # max cooldown for a dead server
 REFRESH_MIN_INTERVAL = 90     # min seconds between credential re-fetches
 MAX_PARALLEL_UPSTREAM = 8     # cap concurrent upstream TLS+CONNECT handshakes
+
+# v4.5.0 "Velocity" - pre-warmed TLS connection pool ------------------------
+# Every proxied connection used to pay TCP + full TLS handshake + CONNECT
+# (~3 round-trips) before the first byte of real data.  The factory now
+# keeps a few TLS-established (pre-CONNECT) connections to the current
+# best server warm in the background, so a client CONNECT costs a single
+# round-trip.  A stale warm connection (server reaped it while idle) is
+# detected instantly and transparently retried fresh.
+POOL_SIZE = 4                 # warm connections kept per factory
+POOL_IDLE_TTL = 25.0          # seconds before a warm conn is replaced
+PROBE_BUDGET = 1.5            # seconds for the startup latency ranking
 
 
 class Stats:
@@ -131,6 +143,36 @@ def _socks_udp_reply(ip: str, port: int) -> bytes:
             bytes([(port >> 8) & 0xFF, port & 0xFF]))
 
 
+# ---- v4.5.0: DNS cache helpers (question-section key + ID rewrite) ------
+def _dns_question_key(query: bytes) -> bytes:
+    """Cache key = the QUESTION section (name+type+class), not the raw
+    packet: stub resolvers randomise the transaction ID, so keying on
+    raw bytes would make the cache almost never hit."""
+    try:
+        if len(query) < 12:
+            return query
+        (qdcount,) = struct.unpack("!H", query[4:6])
+        pos = 12
+        for _ in range(qdcount):
+            while True:
+                ln = query[pos]
+                pos += 1
+                if ln == 0:
+                    break
+                pos += ln
+            pos += 4                      # qtype + qclass
+        return query[12:pos]
+    except Exception:
+        return query
+
+
+def _dns_rewrite_id(resp: bytes, qid: bytes) -> bytes:
+    """Copy of `resp` with the transaction ID replaced by `qid`."""
+    if len(resp) < 2:
+        return resp
+    return qid + resp[2:]
+
+
 class _UdpRelay(asyncio.DatagramProtocol):
     """Per-association UDP endpoint (v4.3.0).
 
@@ -145,6 +187,11 @@ class _UdpRelay(asyncio.DatagramProtocol):
     MAX_DGRAM = 9000             # sanity limit (matches the GUI dnsrelay)
     MAX_PARALLEL_DNS = 8
     DNS_TIMEOUT = 8.0
+    # v4.5.0: repeat lookups are answered from a small local cache instead
+    # of opening a fresh TLS tunnel for every single query (which used to
+    # add ~3 RTTs per uncached lookup - very visible while browsing).
+    DNS_CACHE_TTL = 30.0
+    DNS_CACHE_MAX = 512
 
     def __init__(self, proxy: "LocalProxyServer"):
         self.proxy = proxy
@@ -152,6 +199,8 @@ class _UdpRelay(asyncio.DatagramProtocol):
         self._tasks = set()
         self._sem = asyncio.Semaphore(self.MAX_PARALLEL_DNS)
         self._closed = False
+        self._dns_cache = collections.OrderedDict()   # key -> (ts, answer)
+        self.dns_cache_hits = 0
 
     def connection_made(self, transport):
         self.transport = transport
@@ -174,6 +223,24 @@ class _UdpRelay(asyncio.DatagramProtocol):
                 pass
         for t in list(self._tasks):
             t.cancel()
+
+    # ------------------------------------------------------- dns cache
+    def _dns_cache_get(self, key):
+        hit = self._dns_cache.get(key)
+        if not hit:
+            return None
+        ts, payload = hit
+        if time.monotonic() - ts > self.DNS_CACHE_TTL:
+            self._dns_cache.pop(key, None)
+            return None
+        self._dns_cache.move_to_end(key)
+        return payload
+
+    def _dns_cache_put(self, key, payload):
+        self._dns_cache[key] = (time.monotonic(), payload)
+        self._dns_cache.move_to_end(key)
+        while len(self._dns_cache) > self.DNS_CACHE_MAX:
+            self._dns_cache.popitem(last=False)
 
     def datagram_received(self, data, addr):
         if self._closed or len(data) < 10 or len(data) > self.MAX_DGRAM:
@@ -219,6 +286,25 @@ class _UdpRelay(asyncio.DatagramProtocol):
         payload = data[pos + 2:]
         if port != 53 or not payload:
             return      # non-DNS UDP cannot traverse the upstream (documented)
+
+        # v4.5.0: cache hit?  (question-section key, so the stub
+        # resolver's randomised transaction ID does not defeat the cache;
+        # the reply's ID is rewritten to the query's on the way out)
+        key = _dns_question_key(payload)
+        cached = self._dns_cache_get(key)
+        if cached is not None:
+            if self._closed or self.transport is None:
+                return
+            try:
+                resp = _dns_rewrite_id(cached, payload[0:2])
+                self.transport.sendto(b"\x00\x00\x00" + data[3:pos + 2] + resp,
+                                      addr)
+                self.proxy.stats.udp_dns += 1
+                self.dns_cache_hits += 1
+            except Exception:
+                pass
+            return
+
         try:
             async with self._sem:
                 resp = await asyncio.wait_for(
@@ -226,6 +312,8 @@ class _UdpRelay(asyncio.DatagramProtocol):
         except Exception:
             self.proxy.stats.note_fail("udp-dns", f"{host}:53")
             return
+        if resp:
+            self._dns_cache_put(key, resp)
         if self._closed or self.transport is None:
             return
         try:
@@ -390,13 +478,24 @@ class TunnelFactory:
       REFRESH_MIN_INTERVAL), resetting the breaker afterwards.
     * on_refresh: optional callback(new_servers) - used by tunnel mode
       to keep anti-loop routes in sync after credentials rotate.
+
+    v4.5.0 "Velocity":
+    * Pre-warmed TLS pool - see POOL_SIZE above.
+    * Startup latency ranking - probe_server_latency() measures every
+      server concurrently and reorders the list fastest-first (sticky),
+      so round-robin prefers the lowest-RTT server instead of an
+      arbitrary one.  Reordering only happens while no failure state
+      exists yet (breaker maps are index-keyed; remapping under live
+      failures would corrupt them).
     """
 
-    def __init__(self, api, servers, insecure_tls=False, on_refresh=None):
+    def __init__(self, api, servers, insecure_tls=False, on_refresh=None,
+                 log=None):
         self.api = api
         self.servers = list(servers)
         self.insecure_tls = insecure_tls
         self.on_refresh = on_refresh      # callback(new_servers) for tunnel mode
+        self.log = log or (lambda msg, lvl="info": None)
         self.rr = 0
         self._cooldown = {}          # server index -> monotonic deadline
         self._fail_streak = {}       # server index -> consecutive failures
@@ -406,6 +505,165 @@ class TunnelFactory:
         # per-credential rate limit, which used to cascade into
         # dozens of failed connections during browsing bursts.
         self._sem = asyncio.Semaphore(MAX_PARALLEL_UPSTREAM)
+        # --- v4.5.0: warm pool + latency probe ---
+        self._pool = []              # [(idx, reader, writer, created_mono)]
+        self._refill_task = None
+        self._probe_task = None
+        self._closing = False
+        self._pool_hits = 0
+        self._pool_stale = 0
+        self.server_latency = {}     # idx -> ms (from the startup probe)
+
+    # ------------------------------------------------------ lifecycle
+    def start_latency_probe(self):
+        """Kick the background latency ranking (safe to call repeatedly)."""
+        if self._closing:
+            return
+        if self._probe_task is None or self._probe_task.done():
+            self._probe_task = asyncio.ensure_future(self._probe_servers())
+
+    async def stop(self):
+        """Drop warm connections and background tasks (called on core stop)."""
+        self._closing = True
+        for task in (self._refill_task, self._probe_task):
+            if task is not None and not task.done():
+                task.cancel()
+        for task in (self._refill_task, self._probe_task):
+            if task is not None:
+                try:
+                    await asyncio.wait_for(task, timeout=2)
+                except Exception:
+                    pass
+        self._pool_clear()
+
+    # ------------------------------------------------------ warm pool
+    def _pool_take(self, idx):
+        """Pop a live warm connection for server `idx` (newest first).
+        Expired entries are closed on the way."""
+        now = time.monotonic()
+        while self._pool:
+            pos = None
+            for i in range(len(self._pool) - 1, -1, -1):
+                if self._pool[i][0] == idx:
+                    pos = i
+                    break
+            if pos is None:
+                return None
+            entry = self._pool.pop(pos)
+            _i, reader, writer, created = entry
+            if now - created > POOL_IDLE_TTL:
+                self._pool_stale += 1
+                try:
+                    writer.close()
+                except Exception:
+                    pass
+                continue
+            return reader, writer
+        return None
+
+    def _pool_clear(self, idx=None):
+        """Close+drop warm connections (all, or one server's)."""
+        keep = []
+        for entry in self._pool:
+            if idx is None or entry[0] == idx:
+                try:
+                    entry[2].close()
+                except Exception:
+                    pass
+            else:
+                keep.append(entry)
+        self._pool = keep
+
+    def _pool_warm_target(self):
+        """The server warm connections should target: the first healthy
+        server in list order (which is latency-ranked after the probe),
+        WITHOUT advancing the round-robin cursor."""
+        now = time.monotonic()
+        for i in range(len(self.servers)):
+            if self._cooldown.get(i, 0.0) <= now:
+                return i
+        return None
+
+    def _schedule_refill(self):
+        if self._closing:
+            return
+        if self._refill_task is None or self._refill_task.done():
+            self._refill_task = asyncio.ensure_future(self._refill_loop())
+
+    async def _refill_loop(self):
+        """Keep the pool topped up in the background (bounded by the same
+        handshake semaphore as fresh connects, so it never steals more
+        than its fair share)."""
+        try:
+            while not self._closing:
+                try:
+                    now = time.monotonic()
+                    self._pool = [e for e in self._pool
+                                  if now - e[3] <= POOL_IDLE_TTL]
+                    if len(self._pool) < POOL_SIZE:
+                        idx = self._pool_warm_target()
+                        if idx is None:
+                            await asyncio.sleep(1.0)
+                            continue
+                        server = self.servers[idx]
+                        async with self._sem:
+                            if self._closing:
+                                return
+                            reader, writer = await tls_connect(
+                                server, insecure_tls=self.insecure_tls,
+                                connect_timeout=CONNECT_TIMEOUT,
+                                limit=READ_LIMIT)
+                        if self._closing:
+                            try:
+                                writer.close()
+                            except Exception:
+                                pass
+                            return
+                        self._pool.append((idx, reader, writer,
+                                           time.monotonic()))
+                        continue            # immediately check again
+                    await asyncio.sleep(0.5)
+                except asyncio.CancelledError:
+                    raise
+                except Exception:
+                    # network hiccup - pause briefly instead of hot-looping
+                    await asyncio.sleep(1.0)
+        except asyncio.CancelledError:
+            pass
+
+    def pool_stats(self):
+        return {"warm": len(self._pool), "hits": self._pool_hits,
+                "stale": self._pool_stale}
+
+    # ------------------------------------------------------ latency probe
+    async def _probe_servers(self):
+        """Rank servers by measured RTT (once, at startup)."""
+        try:
+            measured = await probe_server_latency(self.servers,
+                                                  budget=PROBE_BUDGET)
+        except Exception:
+            return
+        if not measured or self._closing:
+            return
+        self.server_latency = dict(measured)
+        # Only reorder while no breaker state exists: _cooldown/_fail_streak
+        # are index-keyed and remapping under live failures is not worth it
+        # (the probe finishes ~1.5 s after startup, long before first
+        # failures can accumulate in practice).
+        if self._cooldown or self._fail_streak or self._pool:
+            return
+        order = sorted(
+            range(len(self.servers)),
+            key=lambda i: (measured.get(i) is None,
+                           measured.get(i, 0)),
+        )
+        if order != list(range(len(self.servers))):
+            self.servers = [self.servers[i] for i in order]
+            self.rr = 0
+        fastest = measured.get(order[0]) if measured else None
+        if fastest is not None:
+            self.log(f"latency-ranked {len(measured)}/{len(self.servers)} "
+                     f"servers - fastest: {fastest} ms", "ok")
 
     def upstream_ips(self):
         """All known upstream proxy addresses (for anti-loop host routes)."""
@@ -455,6 +713,9 @@ class TunnelFactory:
             new_servers = await asyncio.wait_for(
                 self.api.refresh_servers_if_expired(region), timeout=45)
             if new_servers:
+                # credentials rotated: warm conns are still TLS-valid but the
+                # old entries may not even be in the new list - drop them.
+                self._pool_clear()
                 self.servers = list(new_servers)
                 self._cooldown.clear()
                 self._fail_streak.clear()
@@ -470,23 +731,81 @@ class TunnelFactory:
     # -------------------------------------------------------------- open
     async def open(self, target_host, target_port):
         last = None
+        pool_attempted = False
         for attempt in range(MAX_UPSTREAM_ATTEMPTS):
             idx = self._pick_server()
             if idx is None:
                 break
             server = self.servers[idx]
+
+            # ---- v4.5.0 fast path: pre-warmed TLS connection ----
+            # Sending CONNECT on an already-established TLS conn costs one
+            # round-trip instead of TCP+TLS+CONNECT (~3 RTTs).  Only tried
+            # once per open(); a stale warm conn falls through to the normal
+            # fresh-connect path below without burning a rotation slot.
+            if not pool_attempted:
+                pool_attempted = True
+                warm = self._pool_take(idx)
+                if warm is not None:
+                    w_reader, w_writer = warm
+                    try:
+                        rw = await asyncio.wait_for(
+                            send_connect(w_reader, w_writer, server,
+                                         target_host, target_port,
+                                         connect_timeout=CONNECT_TIMEOUT),
+                            timeout=CONNECT_TIMEOUT)
+                        self._pool_hits += 1
+                        self._mark_ok(idx)
+                        self._schedule_refill()
+                        return rw
+                    except UpstreamError as e:
+                        last = e
+                        if e.status in (401, 403):
+                            # real auth rejection: same treatment as fresh
+                            self._mark_fail(idx)
+                            self._pool_clear(idx)
+                            await self._maybe_refresh(server)
+                        elif e.status == 429:
+                            self._mark_fail(idx)
+                            self._pool_clear(idx)
+                            await asyncio.sleep(0.5)
+                        else:
+                            # server closed the idle conn (stale) or odd
+                            # reply: NOT the server's fault - drop every warm
+                            # conn of this server and retry the same idx fresh
+                            self._pool_stale += 1
+                            self._pool_clear(idx)
+                    except asyncio.CancelledError:
+                        try:
+                            w_writer.close()
+                        except Exception:
+                            pass
+                        raise
+                    except Exception:
+                        # network-level staleness (reset/broken pipe on write)
+                        self._pool_stale += 1
+                        self._pool_clear(idx)
+                        try:
+                            w_writer.close()
+                        except Exception:
+                            pass
+                        # fall through: fresh connect on the same server
+
             try:
                 async with self._sem:
                     rw = await connect_via_server(
                         server, target_host, target_port,
                         insecure_tls=self.insecure_tls,
                         connect_timeout=CONNECT_TIMEOUT,
+                        limit=READ_LIMIT,
                     )
                 self._mark_ok(idx)
+                self._schedule_refill()
                 return rw
             except UpstreamError as e:
                 last = e
                 self._mark_fail(idx)
+                self._pool_clear(idx)
                 if e.status in (401, 403):
                     await self._maybe_refresh(server)
                 elif e.status == 429:

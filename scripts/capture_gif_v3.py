@@ -592,7 +592,6 @@ def encode_pipeline(frames_dir, out, stability=10):
     roughly half the size of ffmpeg's paletteuse at equal quality.
     """
     import importlib
-    import shutil
     for d in (CACHE, PAL8):
         os.makedirs(d, exist_ok=True)
         for f in os.listdir(d):

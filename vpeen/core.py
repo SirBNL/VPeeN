@@ -13,10 +13,10 @@ import time
 
 from .api import VeePNApi
 from .cli import DEFAULT_STATE_PATH, validate_bind_security
-from .localproxy import (LocalProxyServer, Stats, TunnelFactory,
-                         install_noise_filter)
+from .localproxy import (READ_LIMIT, LocalProxyServer, Stats,
+                         TunnelFactory, install_noise_filter)
 from .systemproxy import system_off, system_on
-from .upstream import check_exit_ip
+from .upstream import check_exit_ip, probe_server_latency
 from .utils import State
 
 PHASE_DISCONNECTED = "disconnected"
@@ -95,6 +95,34 @@ class Core:
         self.log("Upstream server list was refreshed (credentials rotated).")
         self._emit(type="servers_rotated", upstream_ips=self.upstream_ips())
 
+    async def _verify_exit_ip(self) -> None:
+        """v4.5.0: background exit-IP verification (bounded, 2 servers).
+
+        Runs AFTER the connected phase is already emitted - a failed probe
+        no longer hides a working tunnel behind 'Connecting...', and a
+        successful one just fills in the IP card a moment later."""
+        factory = self.factory
+        if factory is None:
+            return
+        for s in list(getattr(factory, "servers", []))[:2]:
+            if self._stop_evt.is_set() or factory is not self.factory:
+                return
+            try:
+                ip = await asyncio.wait_for(
+                    check_exit_ip(s, insecure_tls=self.insecure,
+                                  connect_timeout=6), timeout=15)
+                if ip:
+                    self._emit(type="exit_ip", ip=ip)
+                    self.log(f"Exit IP verified: {ip}", "ok")
+                    return
+            except asyncio.CancelledError:
+                raise
+            except Exception as e:
+                self.log(f"Upstream check failed ({e}) - trying next server...",
+                         "warn")
+        self.log("Exit IP not verified yet - tunnels keep retrying in background.",
+                 "warn")
+
     def _thread_main(self, region, bind, socks_port, http_port, set_system) -> None:
         loop = asyncio.new_event_loop()
         self._loop = loop
@@ -124,6 +152,7 @@ class Core:
         api = None
         socks_srv = http_srv = None
         client_tasks = set()
+        verify_task = None
         set_system_done = False
         try:
             self.log(f"VPeeN core starting - target region: {region or 'optimal'}")
@@ -160,8 +189,12 @@ class Core:
             stats = Stats()
             self.stats = stats
             factory = TunnelFactory(api, servers, insecure_tls=self.insecure,
-                                    on_refresh=self._on_servers_rotated)
+                                    on_refresh=self._on_servers_rotated,
+                                    log=self.log)
             self.factory = factory
+            # v4.5.0 "Velocity": rank servers by measured RTT (fastest-first,
+            # sticky) and start warming the TLS pool immediately.
+            factory.start_latency_probe()
             proxy = LocalProxyServer(factory, stats)
 
             # --- explicit client-task registry: every handler task is tracked
@@ -190,30 +223,20 @@ class Core:
             def http_cb(r, w):
                 _spawn(proxy.handle_http(r, w))
 
-            socks_srv = await asyncio.start_server(socks_cb, bind, socks_port)
-            http_srv = await asyncio.start_server(http_cb, bind, http_port)
+            socks_srv = await asyncio.start_server(socks_cb, bind, socks_port,
+                                                    limit=READ_LIMIT)
+            http_srv = await asyncio.start_server(http_cb, bind, http_port,
+                                                  limit=READ_LIMIT)
             self.log(f"Local listeners up  |  SOCKS5 {bind}:{socks_port}  |  "
                      f"HTTP {bind}:{http_port}", "ok")
 
-            # sanity-check the tunnel before declaring victory (bounded so a
-            # dead region cannot stall "Connecting..." for minutes)
-            exit_ip = None
-            for s in servers[:2]:
-                try:
-                    exit_ip = await asyncio.wait_for(
-                        check_exit_ip(s, insecure_tls=self.insecure,
-                                      connect_timeout=6), timeout=15)
-                    if exit_ip:
-                        break
-                except Exception as e:
-                    self.log(f"Upstream check failed ({e}) - trying next server...", "warn")
-
-            if exit_ip:
-                self._emit(type="exit_ip", ip=exit_ip)
-                self.log(f"Connected - exit IP: {exit_ip}", "ok")
-            else:
-                self.log("Exit IP not verified yet - tunnels keep retrying in background.",
-                         "warn")
+            # v4.5.0 "Velocity": the listeners are up - the proxies are LIVE
+            # and usable from this exact moment, so the UI flips to
+            # "connected" right away instead of waiting for the exit-IP
+            # probe (which used to add up to 15 s of dead air while the
+            # tunnel was already working).  The exit IP is verified in the
+            # background and arrives as its own event when ready.
+            verify_task = asyncio.ensure_future(self._verify_exit_ip())
 
             if set_system:
                 try:
@@ -224,7 +247,7 @@ class Core:
                 except Exception as e:
                     self.log(f"Could not set system proxy: {e}", "err")
 
-            self._emit(type="phase", phase=PHASE_CONNECTED, region=region, exit_ip=exit_ip)
+            self._emit(type="phase", phase=PHASE_CONNECTED, region=region)
             self._emit(type="listeners", socks_port=socks_port, http_port=http_port,
                        upstream_ips=self.upstream_ips())
 
@@ -253,8 +276,6 @@ class Core:
             self.log(f"Core error: {e}", "err")
             self._emit(type="phase", phase=PHASE_ERROR, detail=str(e))
         finally:
-            self.factory = None
-            self.stats = None
             try:
                 # a stop() cancellation must not abort the cleanup itself
                 cur = asyncio.current_task()
@@ -262,6 +283,18 @@ class Core:
                     cur.uncancel()
             except Exception:
                 pass
+            # v4.5.0: stop the background exit-IP probe and drop the warm
+            # pool before anything else so nothing re-opens sockets while
+            # the rest of the teardown runs.
+            if verify_task is not None and not verify_task.done():
+                verify_task.cancel()
+            if self.factory is not None:
+                try:
+                    await self.factory.stop()
+                except Exception:
+                    pass
+            self.factory = None
+            self.stats = None
             # ---- graceful, warning-free shutdown ----
             # NOTE: on Python 3.12.1+ Server.wait_closed() waits for ALL
             # client handlers, so handlers must be cancelled+reaped BEFORE
@@ -313,8 +346,12 @@ def spawn_quick_task(events_q, kind: str, state_path: str = DEFAULT_STATE_PATH,
                     # v4.2.1: real latency probe so the 'Fastest' sort is
                     # honest.  For each free region: one server_list fetch
                     # (also warms the 12h server cache -> instant region
-                    # switching later) + a TCP connect-time to its first
-                    # server.  Regions that fail simply keep no ping.
+                    # switching later) + a TCP connect-time probe.
+                    # v4.5.0: probe EVERY server of the region (up to 5,
+                    # concurrently) and report the best one, so a region is
+                    # not misjudged because its first entry happens to be a
+                    # slow/blackholed address.  Regions that fail keep no
+                    # ping.
                     regions = (payload or {}).get("regions") or []
                     out = {}
                     for region in regions:
@@ -322,20 +359,10 @@ def spawn_quick_task(events_q, kind: str, state_path: str = DEFAULT_STATE_PATH,
                             servers = await api.server_list(region)
                             if not servers:
                                 continue
-                            host = servers[0]["addresses"][0]
-                            port = int(servers[0]["port"])
-                            t0 = time.monotonic()
-                            w = None
-                            try:
-                                w_reader, w = await asyncio.wait_for(
-                                    asyncio.open_connection(host, port), 4)
-                            finally:
-                                if w is not None:
-                                    try:
-                                        w.close()
-                                    except Exception:
-                                        pass
-                            out[region] = int((time.monotonic() - t0) * 1000)
+                            measured = await probe_server_latency(
+                                servers[:5], budget=2.5)
+                            if measured:
+                                out[region] = min(measured.values())
                         except Exception:
                             continue
                     return out

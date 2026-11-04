@@ -13,7 +13,7 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-00d68f.svg?style=for-the-badge&labelColor=0e1526)](LICENSE)
 [![Platform](https://img.shields.io/badge/Platform-Windows%20%7C%20macOS%20%7C%20Linux-2f81f7.svg?style=for-the-badge&labelColor=0e1526)](#-quick-start)
 [![Python](https://img.shields.io/badge/Python-3.9%2B-ffd43b.svg?style=for-the-badge&labelColor=0e1526)](https://www.python.org/)
-[![GUI](https://img.shields.io/badge/GUI-Aurora%20v4.4-2de3a7.svg?style=for-the-badge&labelColor=0e1526)](#-whats-new-in-v440)
+[![GUI](https://img.shields.io/badge/GUI-Aurora%20v4.5-2de3a7.svg?style=for-the-badge&labelColor=0e1526)](CHANGELOG-v4.5.0.md)
 [![Release](https://img.shields.io/github/v/release/SirBNL/VPeeN?style=for-the-badge&labelColor=0e1526&color=00d68f)](../../releases)
 [![Stars](https://img.shields.io/github/stars/SirBNL/VPeeN?style=for-the-badge&labelColor=0e1526&color=ffcb2f)](../../stargazers)
 
@@ -36,6 +36,10 @@ global proxy network. **VPeeN** speaks the same protocol natively and brings tho
 - 🎨 **“Aurora” GUI (v4.4)** — an animated power orb, drifting aurora gradients, live
   latency bars and realtime traffic stats — a local web app in a native window
   (pywebview) or your browser. No Tk, no Electron, no heavy frameworks
+- ⚡ **“Velocity” networking (v4.5)** — pre-warmed TLS connections cut every proxied
+  connection from ~3 round-trips to 1, blackholed server addresses are raced
+  Happy-Eyeballs style instead of timing out, servers are auto-ranked fastest-first,
+  and repeated DNS lookups are answered from a local cache
 - 🆓 **Free-tier honest** — the list shows the 7 locations the free network actually
   serves, with real measured latency; the 178 premium ones are hidden instead of failing
 
@@ -271,6 +275,29 @@ permissions and the directory with <code>0700</code> (POSIX), so only your user 
 </details>
 
 <details>
+<summary><b>What changed in v4.5.0 (Velocity)?</b></summary>
+<ul>
+<li><b>Pre-warmed TLS connection pool</b> — every proxied connection used to pay TCP +
+full TLS handshake + CONNECT (~3 round-trips) before its first byte. The proxy now keeps
+TLS-established connections warm in the background, so a client CONNECT costs a single
+round-trip. Stale warm connections (silently reaped by the server) are detected instantly
+and retried transparently.</li>
+<li><b>Happy-Eyeballs address racing</b> — a blackholed server address costs 250 ms
+instead of the full 8 s timeout before the next one is tried.</li>
+<li><b>Latency-ranked servers</b> — at startup every server in the region is probed
+concurrently and the list is reordered fastest-first; the GUI’s per-region ping reports
+the region’s best server, not just its first entry.</li>
+<li><b>Instant “connected”</b> — the UI flips to connected the moment the local proxies
+are live; the exit IP is verified in the background instead of blocking the phase.</li>
+<li><b>Throughput & CPU</b> — 256 KiB relay buffers (was 64 KiB), cached SSL contexts
+(no CA-bundle reload per connection), TCP_NODELAY + Windows buffer tuning, and a
+DNS cache for the SOCKS5 UDP-DNS path.</li>
+<li><b>Tests:</b> 17 speed-pass checks + the 23-check live demo-server suite.
+Full list: <a href="CHANGELOG-v4.5.0.md">CHANGELOG-v4.5.0.md</a>.</li>
+</ul>
+</details>
+
+<details>
 <summary><b>What changed in v4.4.0 (Aurora)?</b></summary>
 <ul>
 <li><b>The GUI is a local web app now.</b> A loopback-only server (pure stdlib) runs the proxy
@@ -410,6 +437,21 @@ SOCKS5 :  socks5://127.0.0.1:1080
 HTTP   :  http://127.0.0.1:8080
 ```
 
+## 🆕 تازه‌های نسخه ۴.۵ (Velocity)
+
+- **استخرِ اتصال‌های TLS از پیش گرم** — هر اتصال قبلاً ۳ رفت‌وبرگشت کامل (TCP + TLS + CONNECT)
+  هزینه می‌داد؛ حالا اتصال‌های آماده در پس‌زمینه نگه داشته می‌شن و هر اتصال جدید فقط
+  ۱ رفت‌وبرگشت می‌خره — چیزی ۳ برابر سریع‌تر برای هر کانکت
+- **مسابقه‌ی آدرس‌های سرور (Happy Eyeballs)** — یک آدرس بلاک‌شده دیگه ۸ ثانیه معطلی نمی‌سازه؛
+  همه‌ی آدرس‌ها هم‌زمان مسابقه می‌دن و سالم‌ترین در ~۲۵۰ میلی‌ثانیه برنده می‌شه
+- **رتبه‌بندی سرورها بر اساس تأخیر واقعی** — سریع‌ترین سرور ریجن همیشه اول انتخاب می‌شه؛
+  پینگ هر ریجن هم از بهترین سرورش گزارش می‌شه نه اولین سرورش
+- **اتصال آنی** — رابط بلافاصله بعد از بالا اومدن پراکسی‌ها «متصل» می‌شه؛ تأیید IP خروجی
+  در پس‌زمینه انجام می‌شه
+- **توان عبوری بیشتر** — بافرهای ۲۵۶ کیلوبایتی رله، کش شدن context های TLS،
+  کش DNS برای مسیر SOCKS و تنظیمات TCP بهینه
+(<a href="CHANGELOG-v4.5.0.md">فهرست کامل</a>)
+
 ## 🆕 تازه‌های نسخه ۴.۴ (Aurora)
 
 - **رابط گرافیکی جدید «Aurora»** — به‌جای Tk قدیمی، حالا یک وب‌اپ محلی با انیمیشن‌های نرم،
@@ -458,5 +500,5 @@ HTTP   :  http://127.0.0.1:8080
 <br/>
 <b>⭐ If VPeeN saved you some money, a star is the best thank-you.</b><br/>
 <a href="../../stargazers"><img src="https://img.shields.io/badge/%E2%AD%90-Star%20on%20GitHub-ffcb2f?style=for-the-badge&labelColor=0e1526"/></a>
-<br/><sub>v4.4.0 “Aurora” · pure-Python core · zero-dependency GUI</sub>
+<br/><sub>v4.5.0 “Velocity” · pure-Python core · zero-dependency GUI</sub>
 </div>
