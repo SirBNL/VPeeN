@@ -26,7 +26,10 @@ DEFAULT_RESOLVERS = [
 
 UDP_REPLY_SAFE = 1200          # keep UDP replies below typical MTU
 QUERY_TIMEOUT = 8.0
-CACHE_TTL = 30.0
+# v4.7.0: 30 s -> 60 s, aligned with the SOCKS-UDP relay's cache.  A page
+# rarely re-resolves within a minute, and every miss was a full tunnel
+# round-trip (see localproxy._UdpRelay.DNS_CACHE_TTL).
+CACHE_TTL = 60.0
 CACHE_MAX = 1024
 
 

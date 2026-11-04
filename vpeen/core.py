@@ -259,25 +259,31 @@ class Core:
                 await asyncio.sleep(1.0)
                 # v4.6.0: surface the warm-pool size so the speed machinery
                 # is visible in the UI ("N warm") and in the logs.
+                # v4.7.0: hedges = hedged connects that rescued a stalled
+                # handshake - non-zero means tail-latency protection fired.
                 warm = 0
+                hedges = 0
                 if self.factory is not None:
                     try:
-                        warm = len(self.factory._pool)
+                        ps = self.factory.pool_stats()
+                        warm, hedges = ps["warm"], ps["hedges"]
                     except Exception:
-                        warm = 0
+                        warm, hedges = 0, 0
                 self._emit(type="stats", conns=stats.connections, active=stats.active,
                            failed=stats.failed, up=stats.bytes_up, down=stats.bytes_down,
-                           warm=warm)
+                           warm=warm, hedges=hedges)
                 # v4.6.0: periodic warm-pool health line (every 30 s) - hits
                 # vs stale tells the user whether 'Turbo' is actually paying
-                # off on their route.
+                # off on their route.  v4.7.0: hedges + adaptive TTL joined
+                # the line so Nitro's work is visible too.
                 now = time.monotonic()
                 if self.factory is not None and now - last_pool_log >= 30.0:
                     last_pool_log = now
                     try:
                         ps = self.factory.pool_stats()
                         self.log(f"warm pool: {ps['warm']} live · "
-                                 f"{ps['hits']} hits · {ps['stale']} stale",
+                                 f"{ps['hits']} hits · {ps['stale']} stale · "
+                                 f"{ps['hedges']} hedged · ttl {ps['ttl']}s",
                                  "ok")
                     except Exception:
                         pass

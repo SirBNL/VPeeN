@@ -53,12 +53,12 @@ CONNECT_TIMEOUT = 8           # per-server upstream connect budget
 COOLDOWN_BASE = 20            # first failure cooldown (seconds)
 COOLDOWN_MAX = 600            # max cooldown for a dead server
 REFRESH_MIN_INTERVAL = 90     # min seconds between credential re-fetches
-MAX_PARALLEL_UPSTREAM = 12    # cap concurrent upstream TLS+CONNECT handshakes
-                             # (v4.6.0: 8 -> 12 - browsers open 30+ sockets
-                             # per page load and 4 serialized waves of
-                             # handshakes was a visible chunk of 'site
-                             # loading feels slow'; 12 keeps the free
-                             # proxy's 429 reflex out of the blast radius)
+MAX_PARALLEL_UPSTREAM = 16    # cap concurrent upstream TLS+CONNECT handshakes
+                             # (v4.7.0: 12 -> 16 - with the resolver cache
+                             # each handshake is cheaper AND starts without
+                             # the getaddrinfo thread hop, so a wider window
+                             # of parallel connects no longer means a
+                             # handshake flood for the free proxy)
 
 # v4.5.0 "Velocity" - pre-warmed TLS connection pool ------------------------
 # Every proxied connection used to pay TCP + full TLS handshake + CONNECT
@@ -77,13 +77,28 @@ MAX_PARALLEL_UPSTREAM = 12    # cap concurrent upstream TLS+CONNECT handshakes
 #   hit the pool; with 3 servers two thirds of every burst still paid
 #   full TLS handshakes for nothing).
 # * Parallel refill waves (was: one connection per loop iteration).
-POOL_SIZE = 12                # warm connections kept per factory
-POOL_IDLE_TTL = 25.0          # seconds before a warm conn is replaced
+POOL_SIZE = 12                # floor of the warm pool (see _pool_target)
+POOL_TARGET_MAX = 24          # ceiling when a browsing burst is in flight
+POOL_IDLE_TTL = 25.0          # initial/ceiling TTL of a warm connection
+POOL_TTL_MIN = 8.0            # floor the adaptive TTL may shrink to
 PROBE_BUDGET = 1.5            # seconds for the startup latency ranking
 REFILL_PARALLEL = 4           # concurrent connects per refill wave
 REPROBE_INTERVAL = 60.0       # seconds between latency re-probes
 THROUGHPUT_CANDIDATES = 3     # servers measured by the throughput probe
+THROUGHPUT_FRESH = 600.0      # seconds a throughput measurement ranks by
+THROUGHPUT_REPROBE_EVERY = 3  # probe-loop cycles between throughput re-runs
 REFILL_FAIL_LIMIT = 3         # consecutive refill fails before cooldown
+
+# v4.7.0 "Nitro" - hedged upstream connects -------------------------------
+# When the chosen server's handshake has not landed within HEDGE_DELAY,
+# a SECOND connect to the next-best server starts in parallel; the first
+# success wins.  This kills tail latency: one stalled 'best' server used
+# to cost every connection of a burst its full CONNECT_TIMEOUT (8 s);
+# now it costs 0.35 s.  The hedge only fires when a handshake permit is
+# free, so a browsing burst never doubles its handshake load, and the
+# straggler is reaped (never cancelled - cancelling a connect mid-TLS is
+# a socket-leak path) without breaker penalty for the losing server.
+HEDGE_DELAY = 0.35
 
 
 class Stats:
@@ -522,6 +537,24 @@ class TunnelFactory:
       the ranking honest mid-session WITHOUT ever mutating self.servers
       (breaker maps are index-keyed; only ordering metadata refreshes).
     * Parallel refill waves - see _refill_loop.
+
+    v4.7.0 "Nitro":
+    * Hedged connects - a stalled handshake gets a parallel backup on
+      the next-best server after HEDGE_DELAY; first success wins, the
+      straggler is reaped leak-free and not penalised.  Tail latency
+      under a bad 'best' server drops from CONNECT_TIMEOUT to
+      HEDGE_DELAY.
+    * Adaptive warm-pool TTL - every stale warm connection (server
+      reaped an idle socket before our TTL) shrinks the TTL toward
+      POOL_TTL_MIN; it recovers slowly between probe cycles.  Pools stop
+      donating failed CONNECTs to servers that reap idle conns fast.
+    * Demand-adaptive pool size - the refill target tracks how many
+      open()s the last 10 s saw (12..POOL_TARGET_MAX), so a burst-driven
+      session keeps more pre-paid connections around for the NEXT burst.
+    * Throughput aging + re-probe - measurements older than
+      THROUGHPUT_FRESH stop ranking the server, and the periodic probe
+      re-measures the top candidates so a 'best' server that collapsed
+      under load is demoted mid-session.
     """
 
     def __init__(self, api, servers, insecure_tls=False, on_refresh=None,
@@ -551,6 +584,11 @@ class TunnelFactory:
         # --- v4.6.0: throughput ranking + refill health ---
         self.server_throughput = {}  # idx -> KB/s (128 KiB measured download)
         self._refill_fails = {}      # idx -> consecutive refill failures
+        # --- v4.7.0 "Nitro" ---
+        self._tp_ts = {}             # idx -> monotonic ts of last throughput measure
+        self._ttl = POOL_IDLE_TTL    # adaptive warm-conn TTL (shrinks on stale)
+        self._open_times = collections.deque()   # open() ts, 10 s demand window
+        self._hedges_fired = 0       # hedged connects started (stats only)
 
     # ------------------------------------------------------ lifecycle
     def start_latency_probe(self):
@@ -579,6 +617,37 @@ class TunnelFactory:
         self._pool_clear()
 
     # ------------------------------------------------------ warm pool
+    def _note_stale(self):
+        """Record one stale warm conn and adaptively shrink the TTL (v4.7.0).
+
+        A stale entry means the server reaped its idle socket BEFORE our
+        TTL said it would; shorter TTL -> fewer wasted CONNECT attempts
+        on this server.  Multiplicative shrink with a floor, slow linear
+        recovery in _recover_ttl() between probe cycles."""
+        self._pool_stale += 1
+        self._ttl = max(POOL_TTL_MIN, self._ttl * 0.6)
+
+    def _recover_ttl(self):
+        """Slowly grow the warm TTL back toward the ceiling (probe cycles)."""
+        self._ttl = min(POOL_IDLE_TTL, self._ttl + 2.5)
+
+    def _note_open(self):
+        """Remember one open() for the 10 s demand window."""
+        now = time.monotonic()
+        self._open_times.append(now)
+        while self._open_times and now - self._open_times[0] > 10.0:
+            self._open_times.popleft()
+
+    def _pool_target(self) -> int:
+        """Dynamic refill target (v4.7.0): how many warm connections to keep.
+
+        Browsing is bursty - a page load fires 6-30 opens inside a second,
+        then often another burst within seconds (redirect chains, XHR
+        storms).  Keeping the pool as deep as the LAST burst's 10 s window
+        means the second burst starts mostly pre-paid.  Capped to protect
+        the free proxy's handshake budget."""
+        return min(POOL_TARGET_MAX, max(POOL_SIZE, len(self._open_times)))
+
     def _pool_take(self, idx):
         """Pop a live warm connection for server `idx` (newest first).
         Expired entries are closed on the way."""
@@ -593,8 +662,8 @@ class TunnelFactory:
                 return None
             entry = self._pool.pop(pos)
             _i, reader, writer, created = entry
-            if now - created > POOL_IDLE_TTL:
-                self._pool_stale += 1
+            if now - created > self._ttl:
+                self._note_stale()
                 try:
                     writer.close()
                 except Exception:
@@ -625,8 +694,8 @@ class TunnelFactory:
                 return None
             entry = self._pool.pop(pos)
             idx, reader, writer, created = entry
-            if now - created > POOL_IDLE_TTL:
-                self._pool_stale += 1
+            if now - created > self._ttl:
+                self._note_stale()
                 try:
                     writer.close()
                 except Exception:
@@ -677,7 +746,12 @@ class TunnelFactory:
         lat = self.server_latency
 
         def _key(i):
-            t = tp.get(i)
+            # v4.7.0: a throughput measurement only ranks the server while
+            # it is FRESH; a stale measurement is treated as 'unmeasured' so
+            # a collapsed ex-'best' server degrades to latency order instead
+            # of clinging to a 10-minute-old number.
+            t = tp.get(i) if self._tp_ts.get(i, 0.0) > now - THROUGHPUT_FRESH \
+                else None
             return (0 if t is not None else 1,
                     -(t or 0.0),
                     lat.get(i, 999999.0),
@@ -707,8 +781,8 @@ class TunnelFactory:
                 try:
                     now = time.monotonic()
                     self._pool = [e for e in self._pool
-                                  if now - e[3] <= POOL_IDLE_TTL]
-                    need = POOL_SIZE - len(self._pool)
+                                  if now - e[3] <= self._ttl]
+                    need = self._pool_target() - len(self._pool)
                     if need <= 0:
                         await asyncio.sleep(0.5)
                         continue
@@ -774,7 +848,8 @@ class TunnelFactory:
 
     def pool_stats(self):
         return {"warm": len(self._pool), "hits": self._pool_hits,
-                "stale": self._pool_stale}
+                "stale": self._pool_stale, "ttl": round(self._ttl, 1),
+                "hedges": self._hedges_fired}
 
     # ------------------------------------------------------ latency probe
     async def _probe_servers(self):
@@ -828,9 +903,14 @@ class TunnelFactory:
         await self._probe_throughput()
 
         # ---- v4.6.0: periodic latency re-probe keeps the ranking honest
-        # mid-session without ever mutating self.servers.
+        # mid-session without ever mutating self.servers.  v4.7.0: the same
+        # cycle slowly recovers the adaptive warm TTL and, every
+        # THROUGHPUT_REPROBE_EVERY cycles, re-measures the top candidates
+        # so a 'best' server that collapsed under load is demoted.
+        cycle = 0
         while not self._closing:
             await asyncio.sleep(REPROBE_INTERVAL)
+            cycle += 1
             try:
                 m = await probe_server_latency(self.servers,
                                                budget=PROBE_BUDGET)
@@ -838,6 +918,12 @@ class TunnelFactory:
                     self.server_latency.update(m)
             except Exception:
                 pass
+            self._recover_ttl()
+            if cycle % THROUGHPUT_REPROBE_EVERY == 0:
+                try:
+                    await self._probe_throughput()
+                except Exception:
+                    pass
 
     async def _probe_throughput(self):
         """Measure real download speed through the top candidates and
@@ -869,7 +955,9 @@ class TunnelFactory:
         await asyncio.gather(*[one(i) for i in top])
         if self._closing or not results:
             return
+        now = time.monotonic()
         self.server_throughput = dict(results)
+        self._tp_ts = {i: now for i in results}
         best_idx, best_kbps = max(results.items(), key=lambda kv: kv[1])
         self.log(f"throughput probe: best server #{best_idx} at "
                  f"{best_kbps:.0f} KB/s ({len(results)}/{len(top)} "
@@ -953,6 +1041,7 @@ class TunnelFactory:
     # -------------------------------------------------------------- open
     async def open(self, target_host, target_port):
         last = None
+        self._note_open()          # v4.7.0: feed the demand window
 
         # ---- v4.6.0 fast path: ANY live warm connection, newest first.
         # Sending CONNECT on an already-established TLS conn costs one
@@ -1014,16 +1103,11 @@ class TunnelFactory:
                 break
             server = self.servers[idx]
             try:
-                async with self._sem:
-                    rw = await connect_via_server(
-                        server, target_host, target_port,
-                        insecure_tls=self.insecure_tls,
-                        connect_timeout=CONNECT_TIMEOUT,
-                        limit=READ_LIMIT,
-                    )
-                self._mark_ok(idx)
+                u_reader, u_writer, win_idx = await self._connect_hedged(
+                    idx, target_host, target_port)
+                self._mark_ok(win_idx)
                 self._schedule_refill()
-                return rw
+                return u_reader, u_writer
             except UpstreamError as e:
                 last = e
                 self._mark_fail(idx)
@@ -1038,6 +1122,112 @@ class TunnelFactory:
         if last is None:
             last = UpstreamError("No upstream servers available")
         raise last
+
+    # ----------------------------------------------- v4.7.0 hedged connect
+    async def _connect_one(self, idx: int, target_host, target_port):
+        """One bounded fresh connect to server `idx` (handshake permit held)."""
+        async with self._sem:
+            if self._closing:
+                raise UpstreamError("factory is closing")
+            return await connect_via_server(
+                self.servers[idx], target_host, target_port,
+                insecure_tls=self.insecure_tls,
+                connect_timeout=CONNECT_TIMEOUT,
+                limit=READ_LIMIT,
+            )
+
+    def _backup_server(self, skip_idx):
+        """Next-best healthy server for a hedged attempt, or None.
+
+        Only when a handshake permit is FREE: under a browsing burst the
+        semaphore is saturated and hedging would double the very load we
+        are trying to clear (and trip the free proxy's 429 reflex)."""
+        if self._sem.locked():
+            return None
+        for i in self._server_order():
+            if i != skip_idx:
+                return i
+        return None
+
+    async def _reap_connect(self, task):
+        """Wait out a straggler hedged connect and close its socket.
+
+        The loser of a hedge is never CANCELLED: cancelling asyncio's
+        connect mid-TLS-handshake is a socket-leak path (the transport is
+        only wired up once create_connection returns).  Letting it run to
+        completion - bounded by CONNECT_TIMEOUT - and closing the result
+        is leak-free; it costs the losing server one idle connection."""
+        try:
+            _reader, writer = await asyncio.shield(task)
+        except Exception:
+            return
+        try:
+            writer.close()
+        except Exception:
+            pass
+
+    async def _connect_hedged(self, idx: int, target_host, target_port):
+        """Fresh connect to `idx` with ONE speculative backup (v4.7.0 "Nitro").
+
+        Timeline: the primary starts immediately.  If it has not landed
+        within HEDGE_DELAY, a backup connect to the next-best server starts
+        in parallel (only when a handshake permit is free).  The first
+        SUCCESS wins and returns; stragglers are reaped in the background
+        without breaker penalty for the losing server.
+
+        Returns (reader, writer, winner_server_idx)."""
+        primary = asyncio.ensure_future(
+            self._connect_one(idx, target_host, target_port))
+        backup = None
+        bidx = None
+        try:
+            try:
+                rw = await asyncio.wait_for(
+                    asyncio.shield(primary), HEDGE_DELAY)
+                return rw[0], rw[1], idx
+            except asyncio.TimeoutError:
+                pass                       # primary is late - consider a hedge
+
+            bidx = self._backup_server(idx)
+            if bidx is not None and bidx != idx:
+                backup = asyncio.ensure_future(
+                    self._connect_one(bidx, target_host, target_port))
+                self._hedges_fired += 1
+
+            if backup is None:
+                # no hedge (no spare permit / no other server): the primary
+                # is the whole story, keep waiting for it.
+                rw = await primary
+                return rw[0], rw[1], idx
+
+            # race primary vs backup; first success wins
+            pending = {primary, backup}
+            last_exc = None
+            while pending:
+                done, _ = await asyncio.wait(
+                    pending, return_when=asyncio.FIRST_COMPLETED)
+                for t in done:
+                    pending.discard(t)
+                    if t.cancelled():
+                        continue
+                    try:
+                        rw = t.result()
+                    except Exception as e:
+                        last_exc = e
+                        continue
+                    # winner - reap the straggler in the background
+                    for st in list(pending):
+                        asyncio.ensure_future(self._reap_connect(st))
+                    winner_idx = idx if t is primary else bidx
+                    return rw[0], rw[1], winner_idx
+            raise last_exc or UpstreamError("hedged connect failed")
+        except asyncio.CancelledError:
+            # open() itself was cancelled (client hung up): the in-flight
+            # connects must not leak - reap them, then propagate.
+            for t in (primary, backup):
+                if t is not None:
+                    asyncio.ensure_future(self._reap_connect(t))
+            raise
 
 
 class LocalProxyServer:

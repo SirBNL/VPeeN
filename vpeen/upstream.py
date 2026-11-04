@@ -47,6 +47,31 @@ READ_LIMIT = 262144
 # first address that answers at all).
 RACE_STAGGER = 0.15
 
+# v4.7.0 "Nitro" ---------------------------------------------------------
+# Widest race across one server's resolved addresses.  Server entries
+# carry hostnames; one hostname can resolve to several A/AAAA records,
+# and only the FIRST used to be raced against the other entries.  Now a
+# hostname is expanded to its concrete IPs and all of them race staggered,
+# so a blackholed A record costs RACE_STAGGER instead of the full timeout.
+MAX_RACE = 4
+
+# Proxy-hostname resolution cache.  Every fresh upstream connect used to
+# pay a blocking getaddrinfo (thread-pool hop; on Windows the resolver
+# also tries LLMNR/mDNS before DNS, easily 50-200 ms).  Resolved IPs are
+# now cached for RESOLVE_TTL and shared by every connect, latency probe
+# and refill wave; concurrent resolves of the same host share one task
+# (singleflight) so a browser burst produces ONE lookup, not 30.
+RESOLVE_TTL = 60.0
+RESOLVE_MAX = 64
+RESOLVE_TIMEOUT = 5.0
+
+_resolve_cache: "dict[str, tuple[float, list[str]]]" = {}
+_resolve_inflight: "dict[str, asyncio.Task]" = {}
+
+# Tests replace this to fake the resolver; production uses the loop's
+# getaddrinfo (which runs in the default executor).
+_getaddrinfo_hook = None
+
 # Cached SSL contexts (one per verify mode).  Building a context reloads
 # the whole system CA bundle - tens of ms on Windows per connection - and
 # was previously done for EVERY upstream connect.
@@ -58,6 +83,100 @@ _SSL_CTX_CACHE: "dict[bool, ssl.SSLContext]" = {}
 # better WITHOUT an explicit SO_RCVBUF/SO_SNDBUF, which would cap it).
 _WIN_BUF = 512 * 1024
 _MAC_BUF = 512 * 1024
+
+
+def _is_ip_literal(host: str) -> bool:
+    """True when `host` is already a bare IPv4/IPv6 literal."""
+    try:
+        ipaddress.ip_address((host or "").strip("[]"))
+        return True
+    except ValueError:
+        return False
+
+
+async def _resolve_one(host: str) -> list[str]:
+    loop = asyncio.get_running_loop()
+    stale = _resolve_cache.get(host)
+    try:
+        getter = _getaddrinfo_hook or loop.getaddrinfo
+        infos = await asyncio.wait_for(getter(host, None), RESOLVE_TIMEOUT)
+    except Exception:
+        # resolver failed: a stale answer beats no answer, and falling
+        # back to the hostname itself preserves the pre-4.7 behaviour
+        # (asyncio will resolve it internally, sequential per address).
+        if stale is not None:
+            return stale[1]
+        return [host]
+    ips: list[str] = []
+    for info in infos:
+        try:
+            ip = info[4][0]
+        except (IndexError, TypeError):
+            continue
+        if ip and ip not in ips:
+            ips.append(ip)
+    if not ips:
+        return [host]
+    _resolve_cache[host] = (time.monotonic() + RESOLVE_TTL, ips)
+    while len(_resolve_cache) > RESOLVE_MAX:
+        _resolve_cache.pop(next(iter(_resolve_cache)))
+    return ips
+
+
+async def resolve_host(host: str) -> list[str]:
+    """IPs for a proxy hostname, from the TTL cache (v4.7.0 "Nitro").
+
+    IP literals return immediately (no resolver, no thread hop, no cache).
+    Singleflight: while one resolve is in flight every other caller for
+    the same host awaits the SAME task instead of piling 30 getaddrinfo
+    calls onto the thread pool during a browsing burst."""
+    if _is_ip_literal(host):
+        return [host]
+    hit = _resolve_cache.get(host)
+    if hit is not None and time.monotonic() < hit[0]:
+        return hit[1]
+    task = _resolve_inflight.get(host)
+    if task is not None and not task.done():
+        return await asyncio.shield(task)
+    task = asyncio.ensure_future(_resolve_one(host))
+    _resolve_inflight[host] = task
+    try:
+        return await asyncio.shield(task)
+    finally:
+        if _resolve_inflight.get(host) is task:
+            _resolve_inflight.pop(host, None)
+
+
+async def _expand_addresses(addresses) -> "list[tuple[str, str]]":
+    """Server addresses -> [(connect_ip, tls_server_hostname), ...].
+
+    Hostnames are resolved through the cache and expanded to concrete
+    IPs (capped at MAX_RACE); IP literals pass through untouched.  The
+    ORIGINAL hostname is kept as server_hostname so TLS SNI and certificate
+    validation behave exactly as before resolution was introduced."""
+    out: "list[tuple[str, str]]" = []
+    for a in addresses:
+        if not a:
+            continue
+        if _is_ip_literal(a):
+            out.append((a, a))
+            if len(out) >= MAX_RACE:
+                break
+            continue
+        try:
+            ips = await resolve_host(a)
+        except Exception:
+            ips = [a]
+        for ip in ips:
+            out.append((ip, a))
+            if len(out) >= MAX_RACE:
+                break
+        if len(out) >= MAX_RACE:
+            break
+    if not out:
+        first = addresses[0] if addresses else ""
+        out = [(first, first)]
+    return out
 
 
 def _ssl_context(insecure: bool = False) -> ssl.SSLContext:
@@ -190,42 +309,47 @@ def enable_keepalive(writer, idle_hint=45):
 
 
 async def _single_tls(host: str, port: int, ctx: ssl.SSLContext,
-                      timeout: float, limit: int):
-    """One TCP+TLS connect attempt to a single proxy address."""
+                      timeout: float, limit: int, sni: str = ""):
+    """One TCP+TLS connect attempt to a single proxy address.
+
+    `sni` is the ORIGINAL server hostname when `host` is a resolved IP
+    (v4.7.0): certificate validation and SNI keep referring to the name
+    the API gave us, never to the resolved literal."""
     return await asyncio.wait_for(
         asyncio.open_connection(host, port, ssl=ctx,
-                                server_hostname=host, limit=limit),
+                                server_hostname=sni or host, limit=limit),
         timeout=timeout,
     )
 
 
-async def _race_tls(addresses, port: int, ctx: ssl.SSLContext,
+async def _race_tls(candidates, port: int, ctx: ssl.SSLContext,
                     timeout: float, limit: int):
     """Happy-Eyeballs (RFC 8305 style) across a server's addresses.
 
-    Attempt #1 starts immediately; each further address starts RACE_STAGGER
+    `candidates` is a list of (connect_ip, tls_server_hostname) pairs
+    (v4.7.0: resolved IPs race alongside entry addresses).  Attempt #1
+    starts immediately; each further candidate starts RACE_STAGGER
     seconds after the previous one.  The FIRST fully established TLS
     connection wins and the stragglers are cancelled, so one blackholed
-    address costs a 250 ms stagger instead of the whole connect timeout
+    address costs RACE_STAGGER instead of the whole connect timeout
     (the old sequential loop paid up to N x timeout in the worst case).
 
-    Returns (reader, writer, host) of the winner.
-    Raises the first observed error if every attempt fails (or the last
-    error seen - the most recent one is the most informative).
+    Returns (reader, writer, winning_connect_ip) of the winner.
+    Raises the last observed error if every attempt fails.
     """
     loop = asyncio.get_running_loop()
     deadline = loop.time() + timeout
 
-    async def _staggered(i: int, host: str):
+    async def _staggered(i: int, host: str, sni: str):
         if i:
             await asyncio.sleep(RACE_STAGGER * i)
             if loop.time() >= deadline:
                 raise asyncio.TimeoutError()
         left = max(0.05, deadline - loop.time())
-        return await _single_tls(host, port, ctx, left, limit)
+        return await _single_tls(host, port, ctx, left, limit, sni)
 
-    tasks = [asyncio.ensure_future(_staggered(i, h))
-             for i, h in enumerate(addresses)]
+    tasks = [asyncio.ensure_future(_staggered(i, h, s))
+             for i, (h, s) in enumerate(candidates)]
     last_exc: Exception | None = None
     try:
         pending = set(tasks)
@@ -249,7 +373,7 @@ async def _race_tls(addresses, port: int, ctx: ssl.SSLContext,
                         other.cancel()
                     await asyncio.gather(*pending, return_exceptions=True)
                     reader, writer = winner.result()
-                    return reader, writer, addresses[tasks.index(winner)]
+                    return reader, writer, candidates[tasks.index(winner)][0]
                 last_exc = exc
         raise last_exc or UpstreamError("all addresses failed")
     except UpstreamError:
@@ -278,7 +402,9 @@ async def tls_connect(server: dict, insecure_tls: bool = False,
     + CONNECT (~3 RTTs) on every single proxied connection.
 
     Uses the cached SSL context (no CA-bundle reload per connection) and
-    races the server's addresses Happy-Eyeballs style.
+    races the server's addresses Happy-Eyeballs style (v4.7.0: hostnames
+    are resolved through the TTL cache first, so the race covers every
+    A/AAAA record AND skips the per-connect getaddrinfo thread hop).
 
     Returns (reader, writer).
     """
@@ -288,10 +414,12 @@ async def tls_connect(server: dict, insecure_tls: bool = False,
         raise UpstreamError("Malformed server entry")
 
     ctx = _ssl_context(insecure_tls)
-    if len(addresses) == 1:
+    candidates = await _expand_addresses(addresses)
+    if len(candidates) == 1:
+        addr, sni = candidates[0]
         try:
-            reader, writer = await _single_tls(addresses[0], port, ctx,
-                                               connect_timeout, limit)
+            reader, writer = await _single_tls(addr, port, ctx,
+                                               connect_timeout, limit, sni)
         except asyncio.CancelledError:
             raise
         except Exception as e:
@@ -303,8 +431,8 @@ async def tls_connect(server: dict, insecure_tls: bool = False,
             )
     else:
         try:
-            reader, writer, _host = await _race_tls(
-                addresses, port, ctx, connect_timeout, limit)
+            reader, writer, _addr = await _race_tls(
+                candidates, port, ctx, connect_timeout, limit)
         except UpstreamError:
             raise
         except asyncio.CancelledError:
@@ -411,7 +539,21 @@ async def probe_server_latency(servers, budget: float = 1.5,
     async def one(idx: int, srv: dict):
         addresses = srv.get("addresses") or []
         port = int(srv.get("port") or 0)
-        hosts = [a for a in addresses[:max_per_server] if a]
+        hosts: list[str] = []
+        for a in addresses[:max_per_server]:
+            if not a:
+                continue
+            if _is_ip_literal(a):
+                hosts.append(a)
+            else:
+                # v4.7.0: resolved through the shared cache - the probe no
+                # longer pays a getaddrinfo per server per re-probe cycle
+                # (60 re-probes/hour x N servers used to be N x 60 lookups).
+                try:
+                    hosts.extend(await resolve_host(a))
+                except Exception:
+                    hosts.append(a)
+        hosts = hosts[:2]
         if not hosts or not port:
             return idx, None
         best = None

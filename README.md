@@ -307,6 +307,40 @@ permissions and the directory with <code>0700</code> (POSIX), so only your user 
 </details>
 
 <details>
+<summary><b>What changed in v4.7.0 (Nitro)?</b></summary>
+<ul>
+<li><b>Hedged connects — the end of tail latency</b> — when the chosen server's
+TLS handshake has not landed within 350 ms, a parallel backup connect to the
+next-best server starts and the first success wins. A stalled "best" server
+used to cost every connection of a burst its full 8 s budget; it now costs
+0.35 s. The loser is reaped in the background (never cancelled — that is a
+socket-leak path) with no breaker penalty, and hedges only fire when a
+handshake permit is free, so bursts never double their load.</li>
+<li><b>Resolver cache with singleflight</b> — every fresh connect used to pay a
+blocking <code>getaddrinfo</code> (on Windows the resolver also tries LLMNR/mDNS
+first — routinely 50–200 ms). Resolved IPs are cached for 60 s and shared by
+connects, refill waves and probes; a 30-socket burst now produces ONE lookup.
+A dead resolver serves the stale cached answer instead of failing.</li>
+<li><b>Happy-Eyeballs across DNS records</b> — a server given by hostname is
+expanded to its A/AAAA records and all of them race staggered; a blackholed
+first record costs 150 ms instead of the full timeout. SNI and certificate
+validation still use the original hostname.</li>
+<li><b>Adaptive warm-pool TTL (8–25 s)</b> — servers that reap idle sockets fast
+no longer turn warm hits into failed CONNECTs: each stale entry shrinks the
+TTL, and it recovers between probe cycles.</li>
+<li><b>Demand-adaptive pool size (12→24)</b> — the refill target follows the last
+10 s of connection demand, so the burst after a burst starts pre-paid.</li>
+<li><b>Throughput ranking that ages</b> — measurements rank a server for 10 minutes
+and the top candidates are re-measured every ~3 min, so a collapsed "best"
+server is demoted mid-session.</li>
+<li><b>Also</b>: handshake window 12→16, DNS-relay cache 30→60 s, and the UI shows
+"N rescued" (hedges) next to "N warm".</li>
+<li><b>Tests:</b> 135 checks green (42 speed-pass + 59 + 11 + 23). Full list:
+<a href="CHANGELOG-v4.7.0.md">CHANGELOG-v4.7.0.md</a>.</li>
+</ul>
+</details>
+
+<details>
 <summary><b>What changed in v4.6.0 (Turbo)?</b></summary>
 <ul>
 <li><b>Pool-aware scheduling (fixed the 1/N bug)</b> — v4.5.0's warm pool only matched the
@@ -503,6 +537,34 @@ python -m vpeen.cli export nl             # نمایش کانفیگ خام آپ�
 SOCKS5 :  socks5://127.0.0.1:1080
 HTTP   :  http://127.0.0.1:8080
 ```
+
+## 🆕 تازه‌های نسخه ۴.۷ (Nitro)
+
+- **کانکت‌های هج‌شده — پایان تأخیر دُم** — اگه هندشیک TLS سرورِ انتخابی ظرف ۳۵۰ میلی‌ثانیه
+  جواب نده، یک اتصال پشتیبان به سرور بعدی **به‌موازات** شروع می‌شه و هرکدوم زودتر جواب داد
+  برنده‌ست. قبلاً یک سرورِ «بهترینِ» خواب‌آلود برای تک‌تک اتصال‌های یک بَرست تا ۸ ثانیه
+  معطلی می‌ساخت؛ حالا فقط ۰.۳۵ ثانیه. بازنده در پس‌زمینه بی‌نشت (بدون لِیک سوکت) جمع می‌شه
+  و جریمه‌ی بریکری هم نمی‌گیره — و چون هج فقط وقتی ظرفیت هندشیک خالی باشه شلیک می‌شه،
+  بارِ مرورگر هیچ‌وقت دو برابر نمی‌شه
+- **کشِ رزولور با singleflight** — هر کانکت تازه قبلاً یک `getaddrinfo`مسدود می‌پرداخت (روی
+  ویندوز رزولور اول LLMNR/mDNS را هم امتحان می‌کند — راحت ۵۰ تا ۲۰۰ میلی‌ثانیه). حالا IP
+  های حل‌شده ۶۰ ثانیه کش می‌شن و بین همه‌ی کانکت‌ها و موج‌های پرکردن استخر مشترکن؛ یک بَرست
+  ۳۰ سوکتی الان **یک** lookup تولید می‌کنه، نه ۳۰ تا. رزولورِ مُرده هم جوابِ کهنه رو سرو
+  می‌کنه به‌جای اینکه با خطا بشینه
+- **Happy-Eyeballs روی رکوردهای DNS** — سروری که با نامِ هاست معرفی شده به رکوردهای A/AAAA
+  واقعی‌ش باز می‌شه و **همه با هم** مسابقه می‌دن؛ رکورد اولِ سیاه‌شده الان ۱۵۰ میلی‌ثانیه
+  هزینه داره نه کل تایم‌اوت. SNI و اعتبارسنجی گواهی هنوز با نام اصلی انجام می‌شه
+- **TTL تطبیقیِ استخر گرم (۸ تا ۲۵ ثانیه)** — سرورهایی که سوکت‌های بیکار رو سریع می‌کُشن
+  دیگه هیت‌های گرم رو به CONNECT شکست‌خورده تبدیل نمی‌کنن: هر ورودیِ کهنه TTL رو کوچیک
+  می‌کنه و بین سیکل‌های probe دوباره رشد می‌کنه
+- **اندازه‌ی تطبیقیِ استخر (۱۲ تا ۲۴)** — هدفِ پرکردن استخر از تقاضای ۱۰ ثانیه‌ی اخیر
+  پیروی می‌کنه؛ بَرستِ بعدِ بَرست، از قبل پرداخت‌شده شروع می‌شه
+- **رتبه‌بندی توان عبوری که کهنه می‌شه** — اندازه‌گیری‌ها فقط ۱۰ دقیقه اعتبار رتبه‌بندی
+  دارن و کاندیدای‌های برتر هر ~۳ دقیقه دوباره سنجیده می‌شن؛ سرورِ «بهترینی» که زیر بار
+  افتاده وسط نشست تنزل می‌گیره
+- و: پنجره‌ی هندشیک ۱۲→۱۶، کش DNS-ریلی ۳۰→۶۰ ثانیه، و نمایش «N rescued» (هج‌های نجات‌دهنده)
+  کنار «N warm» در آمار — جمعاً **۱۳۵ تست سبز**
+(<a href="CHANGELOG-v4.7.0.md">فهرست کامل</a>)
 
 ## 🆕 تازه‌های نسخه ۴.۶ (Turbo)
 

@@ -227,9 +227,12 @@ function renderStats() {
     $("stat-time").textContent = fmtDur(dur);
     // v4.6.0: "N warm" shows the pre-warmed TLS pool size - the connections
     // that skip the full handshake and start moving data in one round-trip.
+    // v4.7.0: "N rescued" counts hedged connects - handshakes a parallel
+    // backup saved from a stalled server (tail-latency protection).
     const warmTxt = st.warm ? ` · ${st.warm} warm` : "";
+    const hedgeTxt = st.hedges ? ` · ${st.hedges} rescued` : "";
     $("stat-time-note").textContent =
-      `${st.conns || 0} conns · ${st.active || 0} active${warmTxt}`;
+      `${st.conns || 0} conns · ${st.active || 0} active${warmTxt}${hedgeTxt}`;
     $("stat-ip").textContent = S.exit_ip || "…";
     $("stat-ip-note").textContent = "exit IP · click to copy";
   } else {

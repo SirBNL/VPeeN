@@ -223,7 +223,8 @@ class Bridge:
                           "conns": ev.get("conns", 0),
                           "active": ev.get("active", 0),
                           "failed": ev.get("failed", 0),
-                          "warm": ev.get("warm", 0)}
+                          "warm": ev.get("warm", 0),
+                          "hedges": ev.get("hedges", 0)}
             self.emit({"t": "stats", **self.stats})
         elif kind == "system_proxy":
             self.system_proxy = bool(ev.get("on"))
@@ -702,7 +703,8 @@ class Bridge:
                 up += 42000 + int(18000 * (0.5 + abs(hash(down)) % 89) / 89)
                 with self.lock:
                     self.stats = {"up": up, "down": down, "conns": 6,
-                                  "active": 2, "failed": 0, "warm": 9}
+                                  "active": 2, "failed": 0, "warm": 9,
+                                  "hedges": 2}
                 self.emit({"t": "stats", **self.stats})
 
         threading.Thread(target=timeline, daemon=True,

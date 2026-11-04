@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""v4.5.0 "Velocity" + v4.6.0 "Turbo" speed-pass tests.
+"""v4.5.0 "Velocity" + v4.6.0 "Turbo" + v4.7.0 "Nitro" speed-pass tests.
 
 End-to-end checks against a fake TLS upstream (same trick as
 test_vpeen_integration.py, which needs the `openssl` CLI for a throwaway
@@ -29,11 +29,27 @@ v4.6.0 "Turbo" additions:
 9. Throughput ranking: measured KB/s beats equal latency - the
    best-bandwidth server becomes the warm target.
 
+v4.7.0 "Nitro" additions:
+10. Resolver cache: repeated proxy-hostname resolves never touch the
+    resolver twice inside the TTL; IP literals bypass it; a dead
+    resolver serves the stale cached answer instead of failing.
+11. Hostname->IP expansion: a server given by hostname races its A
+    records Happy-Eyeballs style (blackholed first record loses).
+12. Hedged connect: a stalled primary handshake gets a parallel backup
+    after HEDGE_DELAY; total latency ~HEDGE_DELAY, not CONNECT_TIMEOUT.
+13. Adaptive pool TTL: a stale warm entry shrinks the TTL; it recovers
+    between probe cycles; pool_stats exposes ttl/hedges.
+14. Demand-adaptive pool target: quiet keeps the floor, an 18-open
+    burst lifts the refill target to 18.
+15. Throughput aging: measurements stop ranking a server after
+    THROUGHPUT_FRESH seconds.
+
 Run:  python3 scripts/test_speed_pass.py
 """
 import asyncio
 import os
 import shutil
+import socket
 import ssl
 import struct
 import subprocess
@@ -405,8 +421,8 @@ async def test_constants(check):
     check("reader limit is 256 KiB", READ_LIMIT == 262144)
     check("warm pool holds 12 connections", localproxy.POOL_SIZE == 12)
     check("refill waves are parallel (4)", localproxy.REFILL_PARALLEL == 4)
-    check("upstream handshake cap raised to 12",
-          localproxy.MAX_PARALLEL_UPSTREAM == 12)
+    check("upstream handshake cap raised to 16 (v4.7.0)",
+          localproxy.MAX_PARALLEL_UPSTREAM == 16)
 
 
 # ------------------------------------------------ v4.6.0 "Turbo" tests
@@ -521,6 +537,217 @@ async def test_throughput_ranking(check):
     await factory.stop()
 
 
+# ------------------------------------------------------------ v4.7.0 Nitro
+async def test_resolver_cache(check):
+    """v4.7.0: proxy-hostname resolution is cached - a second resolve
+    within the TTL does NOT touch the resolver again, IP literals pass
+    through untouched, and a failed resolver keeps the stale answer."""
+    calls = []
+
+    async def fake_getaddrinfo(host, port):
+        calls.append(host)
+        return [(socket.AF_INET, socket.SOCK_STREAM, 6, "",
+                 ("203.0.113.7", 0)),
+                (socket.AF_INET, socket.SOCK_STREAM, 6, "",
+                 ("203.0.113.8", 0))]
+
+    upstream._resolve_cache.clear()
+    upstream._getaddrinfo_hook = fake_getaddrinfo
+    try:
+        ips1 = await upstream.resolve_host("gateway.example")
+        ips2 = await upstream.resolve_host("gateway.example")
+        lit = await upstream.resolve_host("127.0.0.1")
+    finally:
+        upstream._getaddrinfo_hook = None
+    check("resolver returns every A record",
+          ips1 == ["203.0.113.7", "203.0.113.8"], f"{ips1}")
+    check("second resolve hits the TTL cache (resolver called once)",
+          len(calls) == 1 and ips2 == ips1, f"calls={len(calls)}")
+    check("IP literals bypass the resolver",
+          lit == ["127.0.0.1"] and "127.0.0.1" not in calls)
+
+    # stale-on-error: poison the cache with an EXPIRED entry, break the
+    # resolver, resolve again - the stale answer must be served, not a crash
+    upstream._resolve_cache["gateway.example"] = \
+        (time.monotonic() - 10.0, ["192.0.2.99"])
+
+    async def broken_getaddrinfo(host, port):
+        raise OSError("resolver down")
+
+    upstream._getaddrinfo_hook = broken_getaddrinfo
+    try:
+        ips3 = await upstream.resolve_host("gateway.example")
+    finally:
+        upstream._getaddrinfo_hook = None
+    check("resolver failure serves the stale cached answer",
+          ips3 == ["192.0.2.99"], f"{ips3}")
+    upstream._resolve_cache.clear()
+
+
+async def test_tls_races_resolved_ips(check):
+    """v4.7.0: a server given by HOSTNAME is resolved through the cache
+    and the resolved IPs race Happy-Eyeballs style - the first A record
+    (TLS blackhole) loses, the second (healthy) wins in ~RACE_STAGGER,
+    and TLS SNI keeps referring to the original hostname."""
+    good_srv, good_port = await make_tls_upstream(connect_echo_upstream)
+
+    # raw TCP listener on 127.0.0.2: accepts but NEVER speaks TLS
+    stall = await asyncio.start_server(lambda r, w: None,
+                                        "127.0.0.2", good_port)
+
+    async def fake_getaddrinfo(host, port):
+        return [(socket.AF_INET, socket.SOCK_STREAM, 6, "",
+                 ("127.0.0.2", 0)),
+                (socket.AF_INET, socket.SOCK_STREAM, 6, "",
+                 ("127.0.0.1", 0))]
+
+    upstream._resolve_cache.clear()
+    upstream._getaddrinfo_hook = fake_getaddrinfo
+    server = {"addresses": ["gateway.example"], "port": good_port,
+              "username": "u", "password": "p", "region": "test"}
+    t0 = time.monotonic()
+    try:
+        reader, writer = await upstream.connect_via_server(
+            server, "example.com", 80, insecure_tls=True,
+            connect_timeout=3.0)
+        elapsed = time.monotonic() - t0
+        writer.write(b"nitro")
+        await writer.drain()
+        data = await asyncio.wait_for(reader.read(5), 2.0)
+        check("resolved-IP race lands on the healthy A record",
+              data == b"nitro")
+        check("hostname expansion beats the blackholed A record",
+              elapsed < 2.0, f"elapsed={elapsed:.2f}s")
+        writer.close()
+    except Exception as e:
+        check("resolved-IP race lands on the healthy A record",
+              False, repr(e))
+    finally:
+        upstream._getaddrinfo_hook = None
+        upstream._resolve_cache.clear()
+        stall.close()
+
+
+async def test_hedged_connect(check):
+    """v4.7.0: when the chosen server's TLS handshake STALLS, a backup
+    connect to the next-best server fires after HEDGE_DELAY and wins -
+    total latency ~HEDGE_DELAY instead of the full CONNECT_TIMEOUT."""
+    good_srv, good_port = await make_tls_upstream(connect_echo_upstream)
+
+    # server A: accepts TCP and stays SILENT (TLS handshake hangs)
+    release = asyncio.Event()
+
+    async def stall_handler(reader, writer):
+        await release.wait()           # never speaks TLS until released
+
+    stall_srv = await asyncio.start_server(stall_handler, "127.0.0.9", 0)
+    stall_port = stall_srv.sockets[0].getsockname()[1]
+
+    slow = {"addresses": ["127.0.0.9"], "port": stall_port,
+            "username": "u", "password": "p", "region": "test"}
+    fast = {"addresses": ["127.0.0.1"], "port": good_port,
+            "username": "u", "password": "p", "region": "test"}
+    factory = TunnelFactory(FakeApi(), [slow, fast], insecure_tls=True)
+
+    t0 = time.monotonic()
+    try:
+        reader, writer = await factory.open("example.com", 80)
+        elapsed = time.monotonic() - t0
+        writer.write(b"hedge")
+        await writer.drain()
+        data = await asyncio.wait_for(reader.read(5), 2.0)
+        check("hedged open() connects through the backup server",
+              data == b"hedge")
+        check("stalled primary costs HEDGE_DELAY, not CONNECT_TIMEOUT",
+              elapsed < 2.5, f"elapsed={elapsed:.2f}s")
+        check("exactly one hedge fired", factory._hedges_fired == 1,
+              f"hedges={factory._hedges_fired}")
+        writer.close()
+    except Exception as e:
+        check("hedged open() connects through the backup server",
+              False, repr(e))
+    finally:
+        release.set()                   # let the straggler's TCP close
+        await asyncio.sleep(0.1)
+        await factory.stop()
+        stall_srv.close()
+        good_srv.close()
+
+
+async def test_adaptive_pool_ttl(check):
+    """v4.7.0: a stale warm connection SHRINKS the pool TTL (server reaps
+    idle sockets faster than we assumed) and _recover_ttl() grows it back."""
+    up_srv, up_port = await make_tls_upstream(connect_echo_upstream)
+    server = {"addresses": ["127.0.0.1"], "port": up_port,
+              "username": "u", "password": "p", "region": "test"}
+    factory = TunnelFactory(FakeApi(), [dict(server)], insecure_tls=True)
+
+    class GhostWriter:
+        def close(self):
+            pass
+
+    ttl0 = factory._ttl
+    factory._pool.append((0, None, GhostWriter(), time.monotonic() - 999))
+    got = factory._pool_take_any()
+    check("expired warm entry is treated as stale", got is None)
+    check("stale entry shrinks the adaptive TTL",
+          factory._ttl < ttl0 and factory._ttl >= localproxy.POOL_TTL_MIN,
+          f"{ttl0} -> {factory._ttl}")
+    factory._ttl = localproxy.POOL_TTL_MIN
+    factory._recover_ttl()
+    check("TTL recovers toward the ceiling",
+          factory._ttl == localproxy.POOL_TTL_MIN + 2.5,
+          f"ttl={factory._ttl}")
+    ps = factory.pool_stats()
+    check("pool_stats exposes ttl and hedges (GUI telemetry)",
+          "ttl" in ps and "hedges" in ps, f"{ps}")
+    await factory.stop()
+    up_srv.close()
+
+
+async def test_demand_adaptive_pool_target(check):
+    """v4.7.0: the refill target follows the last 10 s of demand - quiet
+    keeps the floor, a 18-open burst lifts it to 18 (<= POOL_TARGET_MAX)."""
+    up_srv, up_port = await make_tls_upstream(connect_echo_upstream)
+    server = {"addresses": ["127.0.0.1"], "port": up_port,
+              "username": "u", "password": "p", "region": "test"}
+    factory = TunnelFactory(FakeApi(), [dict(server)], insecure_tls=True)
+
+    quiet = factory._pool_target()
+    for _ in range(18):
+        factory._note_open()
+    burst = factory._pool_target()
+    check("quiet demand keeps the pool floor",
+          quiet == localproxy.POOL_SIZE, f"quiet={quiet}")
+    check("a burst widens the refill target",
+          burst == 18, f"burst={burst}")
+    await factory.stop()
+    up_srv.close()
+
+
+async def test_throughput_aging(check):
+    """v4.7.0: a throughput measurement only ranks a server while FRESH;
+    after THROUGHPUT_FRESH it degrades to latency/fairness order."""
+    up_srv, up_port = await make_tls_upstream(connect_echo_upstream)
+    mk = lambda name: {"addresses": ["127.0.0.1"], "port": up_port,
+                       "username": "u", "password": "p", "region": "test"}
+    factory = TunnelFactory(FakeApi(), [mk("a"), mk("b")], insecure_tls=True)
+
+    now = time.monotonic()
+    factory.server_throughput = {0: 50.0, 1: 200.0}
+    factory._tp_ts = {0: now, 1: now}
+    check("fresh measurement ranks best-bandwidth first",
+          factory._server_order()[0] == 1)
+
+    factory._tp_ts = {0: now - localproxy.THROUGHPUT_FRESH - 1,
+                      1: now - localproxy.THROUGHPUT_FRESH - 1}
+    order = factory._server_order()
+    check("stale measurement no longer ranks the server",
+          order == [0, 1], f"order={order}")
+    await factory.stop()
+    up_srv.close()
+
+
 async def main():
     results = []
 
@@ -545,6 +772,12 @@ async def main():
         await test_pool_any_server(check)
         await test_parallel_refill(check)
         await test_throughput_ranking(check)
+        await test_resolver_cache(check)
+        await test_tls_races_resolved_ips(check)
+        await test_hedged_connect(check)
+        await test_adaptive_pool_ttl(check)
+        await test_demand_adaptive_pool_target(check)
+        await test_throughput_aging(check)
 
     failed = [name for name, ok in results if not ok]
     print(f"\n{len(results) - len(failed)}/{len(results)} PASS")
