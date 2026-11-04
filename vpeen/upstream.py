@@ -20,6 +20,7 @@ import os
 import re
 import socket
 import ssl
+import sys
 import time
 
 from .api import USER_AGENT
@@ -40,18 +41,23 @@ CHUNK = 65536
 READ_LIMIT = 262144
 
 # Happy-Eyeballs stagger (RFC 8305 style) between a server's addresses:
-# the first address connects immediately, each extra one 250 ms later -
-# a blackholed first address costs 250 ms instead of the full timeout.
-RACE_STAGGER = 0.25
+# the first address connects immediately, each extra one 150 ms later -
+# a blackholed first address costs 150 ms instead of the full timeout
+# (v4.6.0: 250 ms was needlessly patient when the winner is usually the
+# first address that answers at all).
+RACE_STAGGER = 0.15
 
 # Cached SSL contexts (one per verify mode).  Building a context reloads
 # the whole system CA bundle - tens of ms on Windows per connection - and
 # was previously done for EVERY upstream connect.
 _SSL_CTX_CACHE: "dict[bool, ssl.SSLContext]" = {}
 
-# Socket buffers for Windows (Linux autotunes better WITHOUT an explicit
-# SO_RCVBUF/SO_SNDBUF, which would cap it, so this is nt-only).
+# Socket buffers for Windows and macOS (v4.6.0: macOS joined in - its
+# default maxsockbuf is notoriously small for long-fat pipes, which caps
+# throughput on high-bandwidth x high-latency paths; Linux autotunes
+# better WITHOUT an explicit SO_RCVBUF/SO_SNDBUF, which would cap it).
 _WIN_BUF = 512 * 1024
+_MAC_BUF = 512 * 1024
 
 
 def _ssl_context(insecure: bool = False) -> ssl.SSLContext:
@@ -80,11 +86,14 @@ def _tune_transport(writer) -> None:
             sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
         except (OSError, AttributeError):
             pass
-        if os.name == "nt":
+        # v4.6.0: macOS gets explicit buffers too (Windows keeps them).
+        buf = (_MAC_BUF if sys.platform == "darwin"
+               else _WIN_BUF if os.name == "nt" else 0)
+        if buf:
             for opt in (socket.SO_RCVBUF, socket.SO_SNDBUF):
                 try:
-                    if sock.getsockopt(socket.SOL_SOCKET, opt) < _WIN_BUF:
-                        sock.setsockopt(socket.SOL_SOCKET, opt, _WIN_BUF)
+                    if sock.getsockopt(socket.SOL_SOCKET, opt) < buf:
+                        sock.setsockopt(socket.SOL_SOCKET, opt, buf)
                 except (OSError, AttributeError):
                     pass
     except Exception:
@@ -98,6 +107,12 @@ EXIT_IP_PROBES = (
     ("api.ipify.org", "/?format=json"),
     ("ifconfig.me", "/"),
 )
+
+# v4.6.0 "Turbo": throughput-probe endpoint - Cloudflare's public speed
+# service (reliable, global, anycast).  Plain HTTP on :80 on purpose: no
+# inner TLS, so the probe measures the PROXY path, not another handshake.
+THROUGHPUT_HOST = "speed.cloudflare.com"
+THROUGHPUT_PATH = "/__down?bytes=131072"
 
 SOCK_ERRORS = {
     "general": 0x01,
@@ -435,6 +450,59 @@ async def probe_server_latency(servers, budget: float = 1.5,
         if ms is not None:
             out[idx] = int(ms)
     return out
+
+
+async def probe_throughput(server: dict, insecure_tls: bool = False,
+                           connect_timeout: float = 6.0,
+                           budget: float = 4.0,
+                           max_bytes: int = 131072):
+    """
+    Rough KB/s through ONE candidate server (v4.6.0 "Turbo").
+
+    Downloads 128 KiB from Cloudflare's public speed endpoint THROUGH the
+    candidate's tunnel.  This is the "server-side" quality signal a
+    client can actually obtain: two servers with identical RTT can
+    differ 10x in delivered bandwidth, and only a measured download
+    tells them apart.
+
+    Returns KB/s (elapsed measured from tunnel open, so it integrates
+    handshake latency + bandwidth), or None on ANY failure - callers
+    treat an unmeasured server conservatively instead of guessing.
+    """
+    t0 = time.monotonic()
+    reader, writer = await connect_via_server(
+        server, THROUGHPUT_HOST, 80, insecure_tls=insecure_tls,
+        connect_timeout=connect_timeout,
+    )
+    try:
+        req = (f"GET {THROUGHPUT_PATH} HTTP/1.1\r\n"
+               f"Host: {THROUGHPUT_HOST}\r\n"
+               f"User-Agent: {USER_AGENT}\r\n"
+               f"Accept: */*\r\n"
+               f"Connection: close\r\n\r\n")
+        writer.write(req.encode("latin-1"))
+        await asyncio.wait_for(writer.drain(), timeout=budget)
+        total = 0
+        while total < max_bytes:
+            try:
+                data = await asyncio.wait_for(reader.read(65536),
+                                              timeout=budget)
+            except asyncio.TimeoutError:
+                break
+            if not data:
+                break
+            total += len(data)
+        elapsed = time.monotonic() - t0
+        # 32 KiB floor: a redirect page or an error body must not be
+        # mistaken for a (tiny) throughput measurement.
+        if total >= 32768 and elapsed >= 0.05:
+            return total / 1024.0 / elapsed
+        return None
+    finally:
+        try:
+            writer.close()
+        except Exception:
+            pass
 
 
 async def check_exit_ip(server: dict, insecure_tls: bool = False,

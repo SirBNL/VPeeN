@@ -92,11 +92,43 @@ Download from [**Releases**](../../releases):
 | File | OS | Run |
 |---|---|---|
 | `VPeeN-Windows.zip` | Windows 10/11 | unzip → `VPeeN.exe` |
-| `VPeeN-macOS.zip` | macOS 10.13+ | unzip → `VPeeN.app` *(right-click → Open, the first time)* |
+| `VPeeN-macOS.zip` | macOS 10.13+ | unzip → `VPeeN.app` — see the [macOS first-launch note](#-macos-first-launch-gatekeeper) |
 | `VPeeN-Linux.tar.gz` | Linux x64 | extract → `./VPeeN` |
+| `VPeeN-Chrome-Extension.zip` | Chrome 108+ | unzip → [load unpacked](#-chrome-extension--vpeen-bridge) |
 
 > Windows/macOS open the UI in a native desktop window (pywebview); Linux (and any machine
 > without a webview backend) opens it in your default browser — same UI, same features.
+
+### 🍏 macOS first launch (Gatekeeper)
+
+VPeeN is free, open-source software — and **not** wrapped in a paid Apple Developer
+certificate. On modern macOS (Sequoia and **Tahoe 26**) Gatekeeper answers that with
+*“Apple could not verify ‘VPeeN’ is free of malware…”* and no visible Open button.
+It is a warning, not a defect — the binary is ad-hoc code-signed since v4.6.0. Two ways
+past it:
+
+1. **The two-click way** — try to open the app once, then
+   **System Settings → Privacy & Security** → scroll to the bottom →
+   **“Open Anyway”**. macOS asks once; after that it opens normally forever.
+2. **The one-line way** — Terminal:
+   ```bash
+   xattr -cr /Applications/VPeeN.app     # (or the path where you unzipped it)
+   ```
+   This removes the quarantine flag Apple put on the download.
+
+### 🧩 Chrome extension — VPeeN Bridge
+
+Want *only the browser* on the VPN while the rest of the system stays direct — or the
+one-click switch while VPeeN runs? **VPeeN Bridge** (ships as
+`VPeeN-Chrome-Extension.zip` on every release, source in [`extension/`](extension/)):
+
+1. Unzip it anywhere permanent.
+2. `chrome://extensions` → enable **Developer mode** → **Load unpacked** → pick the folder.
+3. Click the VPeeN icon → flip **“Route Chrome through VPeeN”**.
+
+Two permissions only (`proxy`, `storage`), remote DNS through the tunnel, and the same
+localhost/LAN bypass list as the desktop app. Flip it off and Chrome is instantly direct
+again.
 
 ### Option 2 — Run from source
 
@@ -275,6 +307,34 @@ permissions and the directory with <code>0700</code> (POSIX), so only your user 
 </details>
 
 <details>
+<summary><b>What changed in v4.6.0 (Turbo)?</b></summary>
+<ul>
+<li><b>Pool-aware scheduling (fixed the 1/N bug)</b> — v4.5.0's warm pool only matched the
+round-robin cursor's server, so with 3 servers two thirds of every browsing burst still
+paid full TLS handshakes. Every connection now takes the newest warm connection,
+whatever server it belongs to: <b>3.4× faster connection setup</b> measured on the real
+free network.</li>
+<li><b>Bigger pool, filled in parallel</b> — 12 warm connections (was 4), refilled in
+parallel waves, pre-warmed from the moment you connect — the <i>first</i> page load is
+fast now too, not just the tenth.</li>
+<li><b>Throughput ranking — the server-side signal</b> — at connect time each top server
+is measured with a real 128 KiB download through its own tunnel; the best-bandwidth
+server gets the traffic, not merely the lowest-ping one. Re-measured every 60 s.</li>
+<li><b>Chrome extension (VPeeN Bridge)</b> — issue #2: a 2-permission MV3 extension that
+routes all of Chrome through the local SOCKS5 tunnel with one click. Ships with every
+release.</li>
+<li><b>macOS Gatekeeper</b> — issue #1: release builds are ad-hoc code-signed and the
+README documents the two-click “Open Anyway” path for Sequoia/Tahoe 26.</li>
+<li><b>Also</b>: handshake concurrency 8→12, macOS socket buffers (512 KiB), faster
+Happy-Eyeballs stagger (150 ms), DNS cache TTL 60 s, `N warm` live in the stats line,
+and a fixed v4.5.0 latent bug where the latency map kept stale indices after the
+startup reorder.</li>
+<li><b>Tests:</b> 118 checks green (25 speed-pass + 59 + 11 + 23) plus a real-network
+A/B benchmark. Full list: <a href="CHANGELOG-v4.6.0.md">CHANGELOG-v4.6.0.md</a>.</li>
+</ul>
+</details>
+
+<details>
 <summary><b>What changed in v4.5.0 (Velocity)?</b></summary>
 <ul>
 <li><b>Pre-warmed TLS connection pool</b> — every proxied connection used to pay TCP +
@@ -409,8 +469,15 @@ Respect the laws of your country and the networks you connect to.
 | فایل | سیستم‌عامل | اجرا |
 |---|---|---|
 | `VPeeN-Windows.zip` | ویندوز ۱۰/۱۱ | باز کن → `VPeeN.exe` |
-| `VPeeN-macOS.zip` | مک ۱۰.۱۳+ | باز کن → `VPeeN.app` *(بار اول راست‌کلیک → Open)* |
+| `VPeeN-macOS.zip` | مک ۱۰.۱۳+ | باز کن → `VPeeN.app` *(برای بار اول، پایین رو بخون)* |
 | `VPeeN-Linux.tar.gz` | لینوکس ۶۴بیتی | باز کن → `./VPeeN` |
+| `VPeeN-Chrome-Extension.zip` | کروم ۱۰۸+ | باز کن → Load unpacked |
+
+> 🍏 **کاربران مک (Sequoia / Tahoe 26):** چون VPeeN مجانی و متن‌بازه و گواهی پولی Apple Developer
+> نداره، اولین بار Gatekeeper با پیام «Apple could not verify…» جلوی اجرا رو می‌گیره — این هشداره،
+> نه خرابی. راه‌حل: یک بار سعی کن بازش کنی، بعد برو **System Settings → Privacy & Security**
+> و پایین صفحه روی **Open Anyway** بزن؛ از اون به بعد مستقیم باز می‌شه. یا در Terminal:
+> `xattr -cr /Applications/VPeeN.app`
 
 **روش ۲ — اجرا از سورس:**
 
@@ -436,6 +503,24 @@ python -m vpeen.cli export nl             # نمایش کانفیگ خام آپ�
 SOCKS5 :  socks5://127.0.0.1:1080
 HTTP   :  http://127.0.0.1:8080
 ```
+
+## 🆕 تازه‌های نسخه ۴.۶ (Turbo)
+
+- **رفع باگ ۱/N در استخر گرم** — نسخه قبل فقط وقتی نوبت round-robin روی سرورِ درست می‌افتاد
+  از اتصال‌های آماده استفاده می‌کرد؛ با ۳ سرور، دوسومِ هر بَرست مرورگر هنوز هندشیک کامل
+  TLS می‌پرداخت! حالا هر اتصال جدیدترین اتصال آماده رو می‌گیره — **راه‌اندازی اتصال ۳.۴ برابر
+  سریع‌تر** (اندازه‌گیری‌شده روی شبکه‌ی واقعی)
+- **استخر بزرگ‌تر و موازی** — ۱۲ اتصال آماده (قبلاً ۴) که با موج‌های موازی پر می‌شن و از
+  لحظه‌ی اتصال شروع به گرم شدن می‌کنن — یعنی **اولین** بارگذاری صفحه هم سریعه، نه فقط دهمین
+- **رتبه‌بندی بر اساس توان عبوری واقعی** — برای اولین بار سیگنالِ سمت سرور: موقع اتصال،
+  ۱۲۸ کیلوبایت واقعی از داخل تانل هر کاندید دانلود و سرعتش اندازه گرفته می‌شه؛ سروری که
+  واقعاً پهنای باند می‌ده برنده‌ست، نه فقط کم‌پینگ‌ترین — و هر ۶۰ ثانیه دوباره سنجیده می‌شه
+- **افزونه کروم «VPeeN Bridge»** — فقط با ۲ دسترسی؛ کل کروم رو با یک کلیک از تانل محلی
+  VPeeN عبور می‌ده (DNS هم سمت خروجی حل می‌شه)
+- **امضای ad-hoc مک + راهنمای Gatekeeper** برای مشکل باز نشدن در Tahoe 26
+- و بافرهای سوکت macOS، همزمانی هندشیک ۸→۱۲، DNS کش ۶۰ ثانیه‌ای، نمایش «N warm» زنده
+  در آمار و ۱۱۸ تست سبز + بنچمارک واقعی
+(<a href="CHANGELOG-v4.6.0.md">فهرست کامل</a>)
 
 ## 🆕 تازه‌های نسخه ۴.۵ (Velocity)
 

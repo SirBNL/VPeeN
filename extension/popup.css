@@ -1,0 +1,68 @@
+/* VPeeN Bridge popup - matches the VPeeN "Aurora" dark theme. */
+:root {
+  --bg: #0b1020;
+  --card: #121a30;
+  --line: #223052;
+  --text: #e8edf9;
+  --muted: #8fa3c8;
+  --accent: #38bdf8;
+  --green: #22c55e;
+  --red: #ef4444;
+}
+* { box-sizing: border-box; margin: 0; padding: 0; }
+body {
+  width: 300px;
+  font: 13px/1.45 system-ui, -apple-system, "Segoe UI", sans-serif;
+  background: linear-gradient(160deg, var(--bg), #0d1530 70%);
+  color: var(--text);
+  padding: 14px;
+}
+header { display: flex; align-items: center; gap: 10px; margin-bottom: 14px; }
+.logo { width: 34px; height: 34px; border-radius: 9px; }
+h1 { font-size: 15px; font-weight: 650; letter-spacing: .2px; }
+.status { color: var(--muted); font-size: 11.5px; }
+.status.on { color: var(--green); }
+.status.err { color: var(--red); }
+
+.switch-row {
+  display: flex; align-items: center; justify-content: space-between;
+  background: var(--card); border: 1px solid var(--line);
+  border-radius: 12px; padding: 12px; cursor: pointer; user-select: none;
+}
+.switch { position: relative; width: 42px; height: 24px; flex: none; }
+.switch input { opacity: 0; width: 0; height: 0; }
+.slider {
+  position: absolute; inset: 0; border-radius: 999px;
+  background: #26335a; transition: background .18s;
+}
+.slider::before {
+  content: ""; position: absolute; left: 3px; top: 3px;
+  width: 18px; height: 18px; border-radius: 50%;
+  background: #aebbdd; transition: transform .18s, background .18s;
+}
+.switch input:checked + .slider { background: var(--accent); }
+.switch input:checked + .slider::before { transform: translateX(18px); background: #fff; }
+
+.cfg { display: flex; gap: 8px; margin-top: 10px; }
+.cfg label {
+  flex: 1; display: flex; flex-direction: column; gap: 4px;
+  font-size: 11px; color: var(--muted);
+}
+.cfg label:last-child { flex: 0 0 84px; }
+.cfg input {
+  background: var(--card); color: var(--text);
+  border: 1px solid var(--line); border-radius: 8px;
+  padding: 7px 9px; font: inherit; outline: none; width: 100%;
+}
+.cfg input:focus { border-color: var(--accent); }
+
+.hint { margin-top: 10px; font-size: 11px; color: var(--muted); }
+footer {
+  display: flex; align-items: center; gap: 6px;
+  margin-top: 12px; padding-top: 10px;
+  border-top: 1px solid var(--line);
+  font-size: 11px; color: var(--muted);
+}
+.dot { width: 8px; height: 8px; border-radius: 50%; background: #64748b; flex: none; }
+.dot.ok { background: var(--green); box-shadow: 0 0 6px var(--green); }
+.dot.bad { background: var(--red); }

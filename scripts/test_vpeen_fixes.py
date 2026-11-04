@@ -242,7 +242,7 @@ check("info_plist uses the dynamic version",
       '"CFBundleShortVersionString": _version' in spec_src
       and '"CFBundleVersion": _version' in spec_src)
 import vpeen  # noqa: E402
-check("version bumped to 4.5.0", vpeen.__version__ == "4.5.0")
+check("version bumped to 4.6.0", vpeen.__version__ == "4.6.0")
 
 print("== 13. import sweep (no import cycles) ==")
 for mod in ("vpeen.api", "vpeen.upstream", "vpeen.localproxy", "vpeen.dnsrelay",

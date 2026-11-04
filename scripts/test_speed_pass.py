@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""v4.5.0 "Velocity" speed-pass tests.
+"""v4.5.0 "Velocity" + v4.6.0 "Turbo" speed-pass tests.
 
 End-to-end checks against a fake TLS upstream (same trick as
 test_vpeen_integration.py, which needs the `openssl` CLI for a throwaway
@@ -14,10 +14,20 @@ certificate):
    (server reaped the idle socket) fall back to a fresh connect
    transparently.
 4. Latency ranking: monkeypatched probe results reorder the server list
-   fastest-first.
+   fastest-first, and (v4.6.0) the latency map is REMAPPED to the new
+   indices after the reorder.
 5. SOCKS5 UDP DNS cache: a repeated query (different transaction ID) is
    answered from cache - the upstream sees it exactly once.
-6. Relay chunk size / read limit constants are wired as intended.
+6. Relay chunk size / read limit / pool constants are wired as intended.
+
+v4.6.0 "Turbo" additions:
+7. Pool-aware scheduling: with 3 servers and the round-robin cursor
+   pointing AWAY from the warm server, open() still hits the pool
+   (v4.5.0 capped the hit rate at 1/N).
+8. Parallel refill: a pool that fills 3+ connections while each
+   individual TLS connect takes 0.4 s proves waves, not one-at-a-time.
+9. Throughput ranking: measured KB/s beats equal latency - the
+   best-bandwidth server becomes the warm target.
 
 Run:  python3 scripts/test_speed_pass.py
 """
@@ -94,6 +104,16 @@ async def connect_echo_upstream(reader, writer):
             writer.close()
         except Exception:
             pass
+
+
+async def wait_for(cond, timeout=5.0, interval=0.05):
+    """Poll `cond()` until true or timeout; returns the final value."""
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if cond():
+            return True
+        await asyncio.sleep(interval)
+    return cond()
 
 
 # ------------------------------------------------------------------- tests
@@ -220,7 +240,17 @@ async def test_stale_pool_fallback(check):
     r1, w1 = await factory.open("example.com", 80)
     w1.write(b"x")
     await w1.drain()
-    await asyncio.sleep(0.8)          # pool warms, then server reaps it
+    # v4.6.0: the refiller now fills in parallel waves, so for a
+    # DETERMINISTIC stale-warm scenario we wait for >=1 warm conn, stop
+    # the refiller, and let the reaping upstream close every idle conn.
+    await wait_for(lambda: len(factory._pool) >= 1, timeout=3)
+    if factory._refill_task is not None:
+        factory._refill_task.cancel()
+        try:
+            await asyncio.wait_for(factory._refill_task, 2)
+        except Exception:
+            pass
+    await asyncio.sleep(0.8)          # reaper closes idle conns at 0.4 s
     ok = True
     detail = ""
     try:
@@ -239,7 +269,8 @@ async def test_stale_pool_fallback(check):
 
 
 async def test_latency_ranking(check):
-    """Monkeypatched probe results reorder servers fastest-first."""
+    """Monkeypatched probe results reorder servers fastest-first (and
+    v4.6.0: the latency map is remapped to the NEW indices)."""
     up_srv, up_port = await make_tls_upstream(connect_echo_upstream)
     servers = [
         {"addresses": ["127.0.0.1"], "port": up_port, "username": "u",
@@ -250,19 +281,32 @@ async def test_latency_ranking(check):
     factory = TunnelFactory(FakeApi(), servers, insecure_tls=True)
 
     real_probe = localproxy.probe_server_latency
+    real_tp = localproxy.probe_throughput
 
     async def fake_probe(sv, budget=1.5, max_per_server=1):
         return {0: 200, 1: 5}        # idx1 (fast) is 40x faster
 
+    async def fake_tp(server, **kw):
+        return None                  # throughput unreachable -> no ranking
+
     localproxy.probe_server_latency = fake_probe
+    localproxy.probe_throughput = fake_tp
     try:
         factory.start_latency_probe()
-        await asyncio.wait_for(factory._probe_task, 3)
+        # v4.6.0: the probe task now ends in a periodic re-probe loop,
+        # so wait for the ORDER to settle instead of the task to finish.
+        ok = await wait_for(lambda: factory.servers[0]["name"] == "fast",
+                            timeout=3)
     finally:
         localproxy.probe_server_latency = real_probe
+        localproxy.probe_throughput = real_tp
     check("latency probe reorders fastest-first",
           factory.servers[0]["name"] == "fast")
-    check("probe latency recorded", factory.server_latency.get(1) == 5)
+    # v4.6.0 remap fix: after the reorder the 'fast' server is index 0,
+    # and the latency map must say so (v4.5.0 left the OLD keys behind).
+    check("latency map remapped to new indices",
+          factory.server_latency.get(0) == 5,
+          f"latency={factory.server_latency}")
     await factory.stop()
 
 
@@ -359,6 +403,122 @@ async def test_dns_cache(check):
 async def test_constants(check):
     check("relay chunks are 256 KiB", CHUNK == 262144)
     check("reader limit is 256 KiB", READ_LIMIT == 262144)
+    check("warm pool holds 12 connections", localproxy.POOL_SIZE == 12)
+    check("refill waves are parallel (4)", localproxy.REFILL_PARALLEL == 4)
+    check("upstream handshake cap raised to 12",
+          localproxy.MAX_PARALLEL_UPSTREAM == 12)
+
+
+# ------------------------------------------------ v4.6.0 "Turbo" tests
+async def test_pool_any_server(check):
+    """v4.6.0: open() must hit the warm pool even when the round-robin
+    cursor points at a DIFFERENT server (v4.5.0 capped hits at 1/N)."""
+    up_srv, up_port = await make_tls_upstream(connect_echo_upstream)
+    mk = lambda name: {"addresses": ["127.0.0.1"], "port": up_port,
+                       "username": "u", "password": "p", "region": "test",
+                       "name": name}
+    servers = [mk("a"), mk("b"), mk("c")]
+    factory = TunnelFactory(FakeApi(), servers, insecure_tls=True)
+
+    real_probe = localproxy.probe_server_latency
+    real_tp = localproxy.probe_throughput
+
+    async def fake_probe(sv, budget=1.5, max_per_server=1):
+        return {0: 100, 1: 5, 2: 50}   # server "b" (idx 1) is fastest
+
+    async def fake_tp(server, **kw):
+        return None
+
+    localproxy.probe_server_latency = fake_probe
+    localproxy.probe_throughput = fake_tp
+    try:
+        factory.start_latency_probe()
+        await wait_for(lambda: factory.servers[0]["name"] == "b", 3)
+    finally:
+        localproxy.probe_server_latency = real_probe
+        localproxy.probe_throughput = real_tp
+
+    # let the refiller warm the pool against server "b" (now idx 0);
+    # v4.6.0: _probe_servers itself schedules the refill now, so the pool
+    # is warm BEFORE the first client connection (first page load).
+    warm_ok = await wait_for(lambda: len(factory._pool) >= 2, timeout=4)
+    check("pool pre-warms without any client connection", warm_ok,
+          f"pool={len(factory._pool)}")
+    # point the round-robin cursor at a DIFFERENT server ("c")
+    factory.rr = 2
+    hits_before = factory._pool_hits
+    r, w = await factory.open("example.com", 80)
+    w.write(b"hit")
+    await w.drain()
+    w.close()
+    check("open() hits the pool regardless of the RR cursor",
+          factory._pool_hits > hits_before,
+          f"hits {hits_before} -> {factory._pool_hits}")
+    await factory.stop()
+
+
+async def test_parallel_refill(check):
+    """v4.6.0: the pool fills in parallel waves - with every TLS connect
+    padded to 0.4 s, a serial refiller manages ~1 conn in 0.7 s while a
+    parallel wave of 4 finishes all of them."""
+    up_srv, up_port = await make_tls_upstream(connect_echo_upstream)
+    server = {"addresses": ["127.0.0.1"], "port": up_port,
+              "username": "u", "password": "p", "region": "test"}
+    factory = TunnelFactory(FakeApi(), [dict(server)], insecure_tls=True)
+
+    real_tls = localproxy.tls_connect
+
+    async def slow_tls(srv, **kw):
+        await asyncio.sleep(0.4)       # simulate a long-fat-pipe handshake
+        return await real_tls(srv, **kw)
+
+    localproxy.tls_connect = slow_tls
+    try:
+        factory._schedule_refill()
+        await asyncio.sleep(0.7)
+        pooled = len(factory._pool)
+    finally:
+        localproxy.tls_connect = real_tls
+    check("refill fills in parallel (>=3 of a 4-wave in 0.7 s)",
+          pooled >= 3, f"pool={pooled}")
+    await factory.stop()
+
+
+async def test_throughput_ranking(check):
+    """v4.6.0: with EQUAL latency, the measured-KB/s winner becomes the
+    warm target (the 'server-side' quality signal)."""
+    up_srv, up_port = await make_tls_upstream(connect_echo_upstream)
+    mk = lambda name: {"addresses": ["127.0.0.1"], "port": up_port,
+                       "username": "u", "password": "p", "region": "test",
+                       "name": name}
+    servers = [mk("slow-tp"), mk("fast-tp")]
+    factory = TunnelFactory(FakeApi(), servers, insecure_tls=True)
+
+    real_probe = localproxy.probe_server_latency
+    real_tp = localproxy.probe_throughput
+
+    async def fake_probe(sv, budget=1.5, max_per_server=1):
+        return {0: 5, 1: 5}           # IDENTICAL latency
+
+    async def fake_tp(server, **kw):
+        # measured through the tunnel: "fast-tp" delivers 9x the KB/s
+        return 900.0 if server.get("name") == "fast-tp" else 100.0
+
+    localproxy.probe_server_latency = fake_probe
+    localproxy.probe_throughput = fake_tp
+    try:
+        factory.start_latency_probe()
+        await wait_for(lambda: bool(factory.server_throughput), 3)
+    finally:
+        localproxy.probe_server_latency = real_probe
+        localproxy.probe_throughput = real_tp
+    check("throughput measurements recorded",
+          factory.server_throughput.get(1) == 900.0,
+          f"tp={factory.server_throughput}")
+    check("best-bandwidth server is the warm target",
+          factory._pool_warm_target() == 1,
+          f"target={factory._pool_warm_target()}")
+    await factory.stop()
 
 
 async def main():
@@ -382,6 +542,9 @@ async def main():
         await test_latency_ranking(check)
         await test_dns_cache(check)
         await test_constants(check)
+        await test_pool_any_server(check)
+        await test_parallel_refill(check)
+        await test_throughput_ranking(check)
 
     failed = [name for name, ok in results if not ok]
     print(f"\n{len(results) - len(failed)}/{len(results)} PASS")

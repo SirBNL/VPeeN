@@ -1,0 +1,45 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>VPeeN Bridge</title>
+  <link rel="stylesheet" href="popup.css">
+</head>
+<body>
+  <header>
+    <img src="icons/icon48.png" alt="" class="logo">
+    <div>
+      <h1>VPeeN Bridge</h1>
+      <p id="status" class="status">Checking…</p>
+    </div>
+  </header>
+
+  <label class="switch-row">
+    <span>Route Chrome through VPeeN</span>
+    <span class="switch">
+      <input type="checkbox" id="toggle">
+      <span class="slider"></span>
+    </span>
+  </label>
+
+  <div class="cfg">
+    <label>
+      <span>SOCKS5 host</span>
+      <input type="text" id="host" spellcheck="false" autocomplete="off">
+    </label>
+    <label>
+      <span>Port</span>
+      <input type="number" id="port" min="1" max="65535">
+    </label>
+  </div>
+
+  <p class="hint" id="hint"></p>
+
+  <footer>
+    <span class="dot" id="dot"></span>
+    <span id="foot">VPeeN must be connected first</span>
+  </footer>
+
+  <script src="popup.js"></script>
+</body>
+</html>

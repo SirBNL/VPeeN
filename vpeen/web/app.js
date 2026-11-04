@@ -225,8 +225,11 @@ function renderStats() {
     }
     const dur = S.connected_since ? (Date.now() / 1000 - S.connected_since) : 0;
     $("stat-time").textContent = fmtDur(dur);
+    // v4.6.0: "N warm" shows the pre-warmed TLS pool size - the connections
+    // that skip the full handshake and start moving data in one round-trip.
+    const warmTxt = st.warm ? ` · ${st.warm} warm` : "";
     $("stat-time-note").textContent =
-      `${st.conns || 0} conns · ${st.active || 0} active`;
+      `${st.conns || 0} conns · ${st.active || 0} active${warmTxt}`;
     $("stat-ip").textContent = S.exit_ip || "…";
     $("stat-ip-note").textContent = "exit IP · click to copy";
   } else {

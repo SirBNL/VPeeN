@@ -81,6 +81,18 @@ jobs:
         if: runner.os != 'Linux'
         run: pyinstaller vpeen.spec --noconfirm
 
+      # v4.6.0 (issue #1): ad-hoc code-sign the whole .app bundle.
+      # Unsigned PyInstaller bundles are what macOS Gatekeeper flags as
+      # "Apple could not verify ..." / "damaged" on Sequoia & Tahoe 26.
+      # Ad-hoc signing does NOT replace Apple notarization (that needs a
+      # paid Developer ID), but it makes the bundle structurally valid so
+      # the documented "Open Anyway" path works cleanly.
+      - name: Ad-hoc sign app bundle (macOS)
+        if: runner.os == 'macOS'
+        run: |
+          codesign --force --deep --sign - dist/VPeeN.app
+          codesign --verify --verbose dist/VPeeN.app || true
+
       - name: Pack (Windows)
         if: runner.os == 'Windows'
         shell: pwsh
@@ -110,6 +122,16 @@ jobs:
     runs-on: ubuntu-latest
     if: startsWith(github.ref, 'refs/tags/v')
     steps:
+      - uses: actions/checkout@v4
+
+      # v4.6.0 (issue #2): ship the VPeeN Bridge Chrome extension as a
+      # load-unpacked zip attached to every release.
+      - name: Package Chrome extension
+        run: |
+          mkdir -p release-tmp
+          cd extension
+          zip -r ../release-tmp/VPeeN-Chrome-Extension.zip .
+
       - name: Download all artifacts
         uses: actions/download-artifact@v4
         with:
@@ -119,5 +141,7 @@ jobs:
       - name: Attach binaries to GitHub Release
         uses: softprops/action-gh-release@v2
         with:
-          files: release/*
+          files: |
+            release/*
+            release-tmp/*
           generate_release_notes: true

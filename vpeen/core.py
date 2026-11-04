@@ -254,10 +254,33 @@ class Core:
             # live stats feed until stop is requested
             last_failed = 0
             last_fail_log = 0.0
+            last_pool_log = 0.0
             while not self._stop_evt.is_set():
                 await asyncio.sleep(1.0)
+                # v4.6.0: surface the warm-pool size so the speed machinery
+                # is visible in the UI ("N warm") and in the logs.
+                warm = 0
+                if self.factory is not None:
+                    try:
+                        warm = len(self.factory._pool)
+                    except Exception:
+                        warm = 0
                 self._emit(type="stats", conns=stats.connections, active=stats.active,
-                           failed=stats.failed, up=stats.bytes_up, down=stats.bytes_down)
+                           failed=stats.failed, up=stats.bytes_up, down=stats.bytes_down,
+                           warm=warm)
+                # v4.6.0: periodic warm-pool health line (every 30 s) - hits
+                # vs stale tells the user whether 'Turbo' is actually paying
+                # off on their route.
+                now = time.monotonic()
+                if self.factory is not None and now - last_pool_log >= 30.0:
+                    last_pool_log = now
+                    try:
+                        ps = self.factory.pool_stats()
+                        self.log(f"warm pool: {ps['warm']} live · "
+                                 f"{ps['hits']} hits · {ps['stale']} stale",
+                                 "ok")
+                    except Exception:
+                        pass
                 # surface WHY connections fail (throttled to 1 line / 10 s)
                 if stats.failed > last_failed:
                     now = time.monotonic()

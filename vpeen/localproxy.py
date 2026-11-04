@@ -42,7 +42,7 @@ from urllib.parse import urlsplit
 
 from .upstream import (READ_LIMIT, SOCK_ERRORS, UpstreamError,
                        connect_via_server, enable_keepalive, probe_server_latency,
-                       send_connect, tls_connect)
+                       probe_throughput, send_connect, tls_connect)
 
 CHUNK = 262144              # v4.5.0: 256 KiB relay chunks (was 64 KiB)
 HANDSHAKE_TIMEOUT = 30        # per-phase client handshake budget
@@ -53,7 +53,12 @@ CONNECT_TIMEOUT = 8           # per-server upstream connect budget
 COOLDOWN_BASE = 20            # first failure cooldown (seconds)
 COOLDOWN_MAX = 600            # max cooldown for a dead server
 REFRESH_MIN_INTERVAL = 90     # min seconds between credential re-fetches
-MAX_PARALLEL_UPSTREAM = 8     # cap concurrent upstream TLS+CONNECT handshakes
+MAX_PARALLEL_UPSTREAM = 12    # cap concurrent upstream TLS+CONNECT handshakes
+                             # (v4.6.0: 8 -> 12 - browsers open 30+ sockets
+                             # per page load and 4 serialized waves of
+                             # handshakes was a visible chunk of 'site
+                             # loading feels slow'; 12 keeps the free
+                             # proxy's 429 reflex out of the blast radius)
 
 # v4.5.0 "Velocity" - pre-warmed TLS connection pool ------------------------
 # Every proxied connection used to pay TCP + full TLS handshake + CONNECT
@@ -62,9 +67,23 @@ MAX_PARALLEL_UPSTREAM = 8     # cap concurrent upstream TLS+CONNECT handshakes
 # best server warm in the background, so a client CONNECT costs a single
 # round-trip.  A stale warm connection (server reaped it while idle) is
 # detected instantly and transparently retried fresh.
-POOL_SIZE = 4                 # warm connections kept per factory
+#
+# v4.6.0 "Turbo" - the pool became the main event:
+# * POOL_SIZE 4 -> 12: a single page load opens 6-30 sockets; a pool of
+#   4 meant most connections still paid the full handshake.
+# * Pool-aware scheduling (open() now takes ANY live warm connection,
+#   not just the round-robin cursor's server - v4.5.0 only matched the
+#   chosen index, so with N servers at most 1/N of connects could EVER
+#   hit the pool; with 3 servers two thirds of every burst still paid
+#   full TLS handshakes for nothing).
+# * Parallel refill waves (was: one connection per loop iteration).
+POOL_SIZE = 12                # warm connections kept per factory
 POOL_IDLE_TTL = 25.0          # seconds before a warm conn is replaced
 PROBE_BUDGET = 1.5            # seconds for the startup latency ranking
+REFILL_PARALLEL = 4           # concurrent connects per refill wave
+REPROBE_INTERVAL = 60.0       # seconds between latency re-probes
+THROUGHPUT_CANDIDATES = 3     # servers measured by the throughput probe
+REFILL_FAIL_LIMIT = 3         # consecutive refill fails before cooldown
 
 
 class Stats:
@@ -190,7 +209,9 @@ class _UdpRelay(asyncio.DatagramProtocol):
     # v4.5.0: repeat lookups are answered from a small local cache instead
     # of opening a fresh TLS tunnel for every single query (which used to
     # add ~3 RTTs per uncached lookup - very visible while browsing).
-    DNS_CACHE_TTL = 30.0
+    # v4.6.0: TTL 30 s -> 60 s - a page rarely re-resolves within a minute
+    # and every miss was a full tunnel round-trip.
+    DNS_CACHE_TTL = 60.0
     DNS_CACHE_MAX = 512
 
     def __init__(self, proxy: "LocalProxyServer"):
@@ -487,6 +508,20 @@ class TunnelFactory:
       arbitrary one.  Reordering only happens while no failure state
       exists yet (breaker maps are index-keyed; remapping under live
       failures would corrupt them).
+
+    v4.6.0 "Turbo":
+    * Pool-aware scheduling - open() takes ANY live warm connection
+      (newest first) instead of only the round-robin cursor's server,
+      so the pool's hit rate is no longer capped at 1/N by rotation.
+    * Throughput ranking - the top candidates are measured with a real
+      128 KiB download through each server (see upstream.probe_throughput)
+      and the best-bandwidth server wins, not merely the lowest-RTT one.
+      RTT says nothing about server load; this is the strongest
+      "server-side" quality signal a client can obtain.
+    * Periodic latency re-probe (every REPROBE_INTERVAL seconds) keeps
+      the ranking honest mid-session WITHOUT ever mutating self.servers
+      (breaker maps are index-keyed; only ordering metadata refreshes).
+    * Parallel refill waves - see _refill_loop.
     """
 
     def __init__(self, api, servers, insecure_tls=False, on_refresh=None,
@@ -513,6 +548,9 @@ class TunnelFactory:
         self._pool_hits = 0
         self._pool_stale = 0
         self.server_latency = {}     # idx -> ms (from the startup probe)
+        # --- v4.6.0: throughput ranking + refill health ---
+        self.server_throughput = {}  # idx -> KB/s (128 KiB measured download)
+        self._refill_fails = {}      # idx -> consecutive refill failures
 
     # ------------------------------------------------------ lifecycle
     def start_latency_probe(self):
@@ -532,7 +570,11 @@ class TunnelFactory:
             if task is not None:
                 try:
                     await asyncio.wait_for(task, timeout=2)
-                except Exception:
+                except (Exception, asyncio.CancelledError):
+                    # v4.6.0: a task cancelled before its coroutine ever
+                    # started raises CancelledError (a BaseException, so
+                    # 'except Exception' missed it) - swallowing it here is
+                    # exactly right: teardown must keep going.
                     pass
         self._pool_clear()
 
@@ -561,6 +603,38 @@ class TunnelFactory:
             return reader, writer
         return None
 
+    def _pool_take_any(self):
+        """v4.6.0: pop the NEWEST live warm connection across ALL servers.
+
+        Warm connections all target the current best server anyway; what
+        changed is WHO gets to use them.  v4.5.0 matched the pool only
+        against the round-robin cursor's chosen server, so with N servers
+        at most every Nth open() could hit the pool - the rest paid a full
+        TLS handshake while perfectly good warm connections sat idle.
+        Returns (idx, reader, writer) or None; entries of servers that
+        entered cooldown after being pooled are skipped (their
+        credentials may have just been rejected)."""
+        now = time.monotonic()
+        while self._pool:
+            pos = None
+            for i in range(len(self._pool) - 1, -1, -1):
+                if self._cooldown.get(self._pool[i][0], 0.0) <= now:
+                    pos = i
+                    break
+            if pos is None:
+                return None
+            entry = self._pool.pop(pos)
+            idx, reader, writer, created = entry
+            if now - created > POOL_IDLE_TTL:
+                self._pool_stale += 1
+                try:
+                    writer.close()
+                except Exception:
+                    pass
+                continue
+            return idx, reader, writer
+        return None
+
     def _pool_clear(self, idx=None):
         """Close+drop warm connections (all, or one server's)."""
         keep = []
@@ -575,14 +649,41 @@ class TunnelFactory:
         self._pool = keep
 
     def _pool_warm_target(self):
-        """The server warm connections should target: the first healthy
-        server in list order (which is latency-ranked after the probe),
-        WITHOUT advancing the round-robin cursor."""
+        """The server warm connections should target: the current BEST
+        healthy server (throughput first, then latency - v4.6.0), WITHOUT
+        advancing the round-robin cursor."""
+        order = self._server_order()
+        return order[0] if order else None
+
+    def _server_order(self):
+        """v4.6.0: healthy server indices, best-first.
+
+        Ranking key (per server):
+          1. measured throughput (higher wins) - the strongest signal we
+             have; unmeasured servers sort after measured ones;
+          2. measured latency (lower wins);
+          3. round-robin fairness offset - when nothing is measured this
+             degrades to the classic round-robin, spreading load across
+             servers exactly like v4.5.0 did.
+
+        Only the ITERATION order changes - self.servers is never mutated
+        here, so the index-keyed breaker maps stay valid."""
+        n = len(self.servers)
         now = time.monotonic()
-        for i in range(len(self.servers)):
-            if self._cooldown.get(i, 0.0) <= now:
-                return i
-        return None
+        healthy = [i for i in range(n) if self._cooldown.get(i, 0.0) <= now]
+        if not healthy:
+            return []
+        tp = self.server_throughput
+        lat = self.server_latency
+
+        def _key(i):
+            t = tp.get(i)
+            return (0 if t is not None else 1,
+                    -(t or 0.0),
+                    lat.get(i, 999999.0),
+                    (i - self.rr) % n)
+
+        return sorted(healthy, key=_key)
 
     def _schedule_refill(self):
         if self._closing:
@@ -591,38 +692,52 @@ class TunnelFactory:
             self._refill_task = asyncio.ensure_future(self._refill_loop())
 
     async def _refill_loop(self):
-        """Keep the pool topped up in the background (bounded by the same
-        handshake semaphore as fresh connects, so it never steals more
-        than its fair share)."""
+        """Keep the pool topped up in the background (v4.6.0: in PARALLEL
+        waves, bounded by the same handshake semaphore as fresh connects
+        so it never steals more than its fair share).
+
+        Courtesy rule: while client-facing connects hold the semaphore, a
+        refill wave stands by instead of queueing behind them - the
+        browser's 30 sockets must never wait for a background warmer.
+        A server whose refills keep failing is put on the regular breaker
+        cooldown after REFILL_FAIL_LIMIT strikes, so a dead 'best' server
+        stops being warmed."""
         try:
             while not self._closing:
                 try:
                     now = time.monotonic()
                     self._pool = [e for e in self._pool
                                   if now - e[3] <= POOL_IDLE_TTL]
-                    if len(self._pool) < POOL_SIZE:
-                        idx = self._pool_warm_target()
-                        if idx is None:
-                            await asyncio.sleep(1.0)
-                            continue
-                        server = self.servers[idx]
-                        async with self._sem:
-                            if self._closing:
-                                return
-                            reader, writer = await tls_connect(
-                                server, insecure_tls=self.insecure_tls,
-                                connect_timeout=CONNECT_TIMEOUT,
-                                limit=READ_LIMIT)
-                        if self._closing:
-                            try:
-                                writer.close()
-                            except Exception:
-                                pass
-                            return
-                        self._pool.append((idx, reader, writer,
-                                           time.monotonic()))
-                        continue            # immediately check again
-                    await asyncio.sleep(0.5)
+                    need = POOL_SIZE - len(self._pool)
+                    if need <= 0:
+                        await asyncio.sleep(0.5)
+                        continue
+                    if self._sem.locked():
+                        # a browsing burst owns the handshake budget right
+                        # now - warming can wait a quarter beat
+                        await asyncio.sleep(0.25)
+                        continue
+                    idx = self._pool_warm_target()
+                    if idx is None:
+                        await asyncio.sleep(1.0)
+                        continue
+                    wave = min(need, REFILL_PARALLEL)
+                    results = await asyncio.gather(
+                        *[self._warm_one(idx, k) for k in range(wave)],
+                        return_exceptions=True)
+                    added = sum(1 for r in results if r is True)
+                    if added:
+                        self._refill_fails.pop(idx, None)
+                    else:
+                        fails = self._refill_fails.get(idx, 0) + 1
+                        self._refill_fails[idx] = fails
+                        if fails >= REFILL_FAIL_LIMIT:
+                            # stop warming a server that keeps refusing
+                            self._mark_fail(idx)
+                            self.log(f"warm-pool refill failed {fails}x for "
+                                     f"server #{idx} - cooling it down",
+                                     "warn")
+                    await asyncio.sleep(0.2)   # tiny breather between waves
                 except asyncio.CancelledError:
                     raise
                 except Exception:
@@ -631,39 +746,134 @@ class TunnelFactory:
         except asyncio.CancelledError:
             pass
 
+    async def _warm_one(self, idx: int, k: int = 0):
+        """Open ONE warm TLS connection to server `idx` (refill wave
+        member).  Staggered slightly so a wave does not look like a
+        handshake flood to the free proxy's rate limiter."""
+        if k:
+            await asyncio.sleep(0.06 * k)
+        async with self._sem:
+            if self._closing:
+                return None
+            server = self.servers[idx]
+            try:
+                reader, writer = await tls_connect(
+                    server, insecure_tls=self.insecure_tls,
+                    connect_timeout=CONNECT_TIMEOUT,
+                    limit=READ_LIMIT)
+            except Exception:
+                return None
+        if self._closing:
+            try:
+                writer.close()
+            except Exception:
+                pass
+            return None
+        self._pool.append((idx, reader, writer, time.monotonic()))
+        return True
+
     def pool_stats(self):
         return {"warm": len(self._pool), "hits": self._pool_hits,
                 "stale": self._pool_stale}
 
     # ------------------------------------------------------ latency probe
     async def _probe_servers(self):
-        """Rank servers by measured RTT (once, at startup)."""
+        """Rank servers by measured RTT (once, at startup), then by real
+        throughput, then keep re-probing latency so a congested server is
+        demoted mid-session (v4.6.0)."""
         try:
             measured = await probe_server_latency(self.servers,
                                                   budget=PROBE_BUDGET)
         except Exception:
+            measured = {}
+        if self._closing:
             return
-        if not measured or self._closing:
-            return
-        self.server_latency = dict(measured)
+        if measured:
+            self.server_latency = dict(measured)
         # Only reorder while no breaker state exists: _cooldown/_fail_streak
         # are index-keyed and remapping under live failures is not worth it
         # (the probe finishes ~1.5 s after startup, long before first
         # failures can accumulate in practice).
-        if self._cooldown or self._fail_streak or self._pool:
-            return
-        order = sorted(
-            range(len(self.servers)),
-            key=lambda i: (measured.get(i) is None,
-                           measured.get(i, 0)),
-        )
-        if order != list(range(len(self.servers))):
-            self.servers = [self.servers[i] for i in order]
-            self.rr = 0
-        fastest = measured.get(order[0]) if measured else None
-        if fastest is not None:
+        if measured and not (self._cooldown or self._fail_streak or self._pool):
+            order = sorted(
+                range(len(self.servers)),
+                key=lambda i: (measured.get(i) is None,
+                               measured.get(i, 0)),
+            )
+            if order != list(range(len(self.servers))):
+                self.servers = [self.servers[i] for i in order]
+                # v4.6.0 FIX: remap the latency map to the NEW indices.
+                # v4.5.0 kept the OLD keys, so after any reorder every
+                # later latency lookup answered for the wrong server.
+                self.server_latency = {new: measured[old]
+                                       for new, old in enumerate(order)}
+                self.rr = 0
+        if measured:
+            fastest = min(measured.values())
             self.log(f"latency-ranked {len(measured)}/{len(self.servers)} "
                      f"servers - fastest: {fastest} ms", "ok")
+
+        # v4.6.0: start warming the pool NOW - right after the ranking,
+        # BEFORE the throughput probe and long before the user's browser
+        # fires its first connection burst.  v4.5.0 only started filling
+        # the pool after the FIRST client open(), so the very first page
+        # load (the moment users judge 'is it fast?') always paid full
+        # TLS handshakes for every socket.
+        self._schedule_refill()
+
+        # ---- v4.6.0 "Turbo": the server-side quality signal.  RTT says
+        # nothing about load; a 128 KiB download through each of the top
+        # candidates says plenty.  Bounded (top-3, ~4 s each, concurrent),
+        # and a silent no-op on any failure.
+        await self._probe_throughput()
+
+        # ---- v4.6.0: periodic latency re-probe keeps the ranking honest
+        # mid-session without ever mutating self.servers.
+        while not self._closing:
+            await asyncio.sleep(REPROBE_INTERVAL)
+            try:
+                m = await probe_server_latency(self.servers,
+                                               budget=PROBE_BUDGET)
+                if m and not self._closing:
+                    self.server_latency.update(m)
+            except Exception:
+                pass
+
+    async def _probe_throughput(self):
+        """Measure real download speed through the top candidates and
+        rank by it (v4.6.0).  Uses the shared handshake semaphore so the
+        probes cannot crowd out client traffic."""
+        if self._closing or len(self.servers) < 2:
+            return
+        top = self._server_order()[:THROUGHPUT_CANDIDATES]
+        if not top:
+            return
+        results = {}
+
+        async def one(idx: int):
+            try:
+                async with self._sem:
+                    if self._closing:
+                        return
+                    kbps = await asyncio.wait_for(
+                        probe_throughput(self.servers[idx],
+                                         insecure_tls=self.insecure_tls,
+                                         connect_timeout=6,
+                                         budget=4.0),
+                        timeout=6.5)
+            except Exception:
+                return
+            if kbps:
+                results[idx] = kbps
+
+        await asyncio.gather(*[one(i) for i in top])
+        if self._closing or not results:
+            return
+        self.server_throughput = dict(results)
+        best_idx, best_kbps = max(results.items(), key=lambda kv: kv[1])
+        self.log(f"throughput probe: best server #{best_idx} at "
+                 f"{best_kbps:.0f} KB/s ({len(results)}/{len(top)} "
+                 f"measured)", "ok")
 
     def upstream_ips(self):
         """All known upstream proxy addresses (for anti-loop host routes)."""
@@ -676,20 +886,32 @@ class TunnelFactory:
 
     # ----------------------------------------------------------- breaker
     def _pick_server(self):
-        """Return the next server index to try, or None if exhausted."""
+        """Return the next server index to try, or None if exhausted.
+
+        v4.6.0: pass 0 prefers a server that has live warm connections
+        (they are pre-paid - one round-trip instead of three); pass 1
+        walks the healthy servers in _server_order() (throughput, then
+        latency, then fairness); pass 2 is the old all-cooling fallback
+        (closest to expiry)."""
         n = len(self.servers)
         if n == 0:
             return None
         now = time.monotonic()
-        # pass 1: healthy servers in round-robin order
-        for i in range(n):
-            idx = (self.rr + i) % n
-            if self._cooldown.get(idx, 0.0) <= now:
-                self.rr = (idx + 1) % n
-                return idx
-        # pass 2: everything is cooling down - try the one closest to expiry
-        idx = min(self._cooldown, key=lambda k: self._cooldown.get(k, 0.0))
-        return idx
+        if self._pool:
+            warm_idx = {e[0] for e in self._pool}
+            for i in self._server_order():
+                if i in warm_idx:
+                    self.rr = (i + 1) % n
+                    return i
+        order = self._server_order()
+        if order:
+            i = order[0]
+            self.rr = (i + 1) % n
+            return i
+        # everything is cooling down - try the one closest to expiry
+        if self._cooldown:
+            return min(self._cooldown, key=lambda k: self._cooldown.get(k, 0.0))
+        return None
 
     def _mark_ok(self, idx):
         self._fail_streak.pop(idx, None)
@@ -731,66 +953,66 @@ class TunnelFactory:
     # -------------------------------------------------------------- open
     async def open(self, target_host, target_port):
         last = None
-        pool_attempted = False
+
+        # ---- v4.6.0 fast path: ANY live warm connection, newest first.
+        # Sending CONNECT on an already-established TLS conn costs one
+        # round-trip instead of TCP+TLS+CONNECT (~3 RTTs).  v4.5.0 tried
+        # the pool only for the round-robin cursor's chosen server (with
+        # N servers at most 1/N of opens could ever hit it); the pool now
+        # serves ANY open().  A stale warm conn falls through to the
+        # normal fresh-connect path below without burning a rotation slot.
+        warm = self._pool_take_any()
+        if warm is not None:
+            idx, w_reader, w_writer = warm
+            server = self.servers[idx]
+            try:
+                rw = await asyncio.wait_for(
+                    send_connect(w_reader, w_writer, server,
+                                 target_host, target_port,
+                                 connect_timeout=CONNECT_TIMEOUT),
+                    timeout=CONNECT_TIMEOUT)
+                self._pool_hits += 1
+                self._mark_ok(idx)
+                self._schedule_refill()
+                return rw
+            except UpstreamError as e:
+                last = e
+                if e.status in (401, 403):
+                    # real auth rejection: same treatment as fresh
+                    self._mark_fail(idx)
+                    self._pool_clear(idx)
+                    await self._maybe_refresh(server)
+                elif e.status == 429:
+                    self._mark_fail(idx)
+                    self._pool_clear(idx)
+                    await asyncio.sleep(0.5)
+                else:
+                    # server closed the idle conn (stale) or odd reply:
+                    # NOT the server's fault - drop every warm conn of
+                    # this server; the fresh path below picks up at once.
+                    self._pool_stale += 1
+                    self._pool_clear(idx)
+            except asyncio.CancelledError:
+                try:
+                    w_writer.close()
+                except Exception:
+                    pass
+                raise
+            except Exception:
+                # network-level staleness (reset/broken pipe on write)
+                self._pool_stale += 1
+                self._pool_clear(idx)
+                try:
+                    w_writer.close()
+                except Exception:
+                    pass
+                # fall through: fresh connect below
+
         for attempt in range(MAX_UPSTREAM_ATTEMPTS):
             idx = self._pick_server()
             if idx is None:
                 break
             server = self.servers[idx]
-
-            # ---- v4.5.0 fast path: pre-warmed TLS connection ----
-            # Sending CONNECT on an already-established TLS conn costs one
-            # round-trip instead of TCP+TLS+CONNECT (~3 RTTs).  Only tried
-            # once per open(); a stale warm conn falls through to the normal
-            # fresh-connect path below without burning a rotation slot.
-            if not pool_attempted:
-                pool_attempted = True
-                warm = self._pool_take(idx)
-                if warm is not None:
-                    w_reader, w_writer = warm
-                    try:
-                        rw = await asyncio.wait_for(
-                            send_connect(w_reader, w_writer, server,
-                                         target_host, target_port,
-                                         connect_timeout=CONNECT_TIMEOUT),
-                            timeout=CONNECT_TIMEOUT)
-                        self._pool_hits += 1
-                        self._mark_ok(idx)
-                        self._schedule_refill()
-                        return rw
-                    except UpstreamError as e:
-                        last = e
-                        if e.status in (401, 403):
-                            # real auth rejection: same treatment as fresh
-                            self._mark_fail(idx)
-                            self._pool_clear(idx)
-                            await self._maybe_refresh(server)
-                        elif e.status == 429:
-                            self._mark_fail(idx)
-                            self._pool_clear(idx)
-                            await asyncio.sleep(0.5)
-                        else:
-                            # server closed the idle conn (stale) or odd
-                            # reply: NOT the server's fault - drop every warm
-                            # conn of this server and retry the same idx fresh
-                            self._pool_stale += 1
-                            self._pool_clear(idx)
-                    except asyncio.CancelledError:
-                        try:
-                            w_writer.close()
-                        except Exception:
-                            pass
-                        raise
-                    except Exception:
-                        # network-level staleness (reset/broken pipe on write)
-                        self._pool_stale += 1
-                        self._pool_clear(idx)
-                        try:
-                            w_writer.close()
-                        except Exception:
-                            pass
-                        # fall through: fresh connect on the same server
-
             try:
                 async with self._sem:
                     rw = await connect_via_server(
