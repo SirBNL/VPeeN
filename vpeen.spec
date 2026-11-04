@@ -100,7 +100,18 @@ elif os.path.exists(tun_path):
 else:
     print(f"!! WARNING: {tun_path} missing - tunnel mode unavailable")
 
-icon = "assets/icon.ico" if os.path.exists("assets/icon.ico") else None
+# Icon: per-platform.  v4.4.0 dropped Pillow from the build env, and
+# PyInstaller needs a native .icns on macOS (it can no longer auto-convert
+# .ico without Pillow -> the v4.4.0 macOS CI build died on exactly that).
+# assets/icon.icns is generated from icon.png (see scripts/make_icns.py)
+# and committed so CI never needs Pillow for icon conversion again.
+if system == "darwin":
+    icon = "assets/icon.icns" if os.path.exists("assets/icon.icns") else (
+        "assets/icon.png" if os.path.exists("assets/icon.png") else None)
+elif system.startswith("windows"):
+    icon = "assets/icon.ico" if os.path.exists("assets/icon.ico") else None
+else:
+    icon = "assets/icon.png" if os.path.exists("assets/icon.png") else None
 
 a = Analysis(
     ["main.py"],
@@ -136,10 +147,12 @@ exe = EXE(
 )
 
 if sys.platform == "darwin":
+    _bundle_icon = ("assets/icon.icns" if os.path.exists("assets/icon.icns")
+                    else icon)
     app = BUNDLE(
         exe,
         name="VPeeN.app",
-        icon="assets/icon.ico",
+        icon=_bundle_icon,
         bundle_identifier="com.sirbnl.vpeen",
         info_plist={
             "CFBundleName": "VPeeN",
