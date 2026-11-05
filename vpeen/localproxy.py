@@ -42,7 +42,8 @@ from urllib.parse import urlsplit
 
 from .upstream import (READ_LIMIT, SOCK_ERRORS, UpstreamError,
                        connect_via_server, enable_keepalive, probe_server_latency,
-                       probe_throughput, send_connect, tls_connect)
+                       probe_throughput, resolve_host, send_connect, tls_connect,
+                       _is_ip_literal)
 
 CHUNK = 262144              # v4.5.0: 256 KiB relay chunks (was 64 KiB)
 HANDSHAKE_TIMEOUT = 30        # per-phase client handshake budget
@@ -964,13 +965,60 @@ class TunnelFactory:
                  f"measured)", "ok")
 
     def upstream_ips(self):
-        """All known upstream proxy addresses (for anti-loop host routes)."""
+        """All known upstream proxy addresses (for anti-loop host routes).
+
+        v4.8.0: kept for compatibility/reporting only - the entries can be
+        HOSTNAMES, which `route`/`ip` cannot use directly (Linux `ip` rejects
+        them outright).  Tunnel anti-loop routes must come from
+        upstream_pins()/resolved_upstream_ips() instead."""
         ips = []
         for s in self.servers:
             for a in s.get("addresses") or []:
                 if a and a not in ips:
                     ips.append(a)
         return ips
+
+    # ------------------------------------------- v4.8.0 "Sentinel" tunnel glue
+    async def upstream_pins(self) -> "dict[str, list[str]]":
+        """hostname -> concrete IPs for every server entry (v4.8.0).
+
+        Resolved through the shared cache; hostnames that refuse to resolve
+        are simply absent (they keep the legacy resolve-at-dial behaviour).
+        IP literals are returned as pins of themselves so the caller gets
+        one uniform shape."""
+        pins: "dict[str, list[str]]" = {}
+        for s in self.servers:
+            for a in s.get("addresses") or []:
+                if not a or a in pins:
+                    continue
+                if _is_ip_literal(a):
+                    pins[a] = [a]
+                    continue
+                try:
+                    ips = [ip for ip in await resolve_host(a)
+                           if _is_ip_literal(ip)]
+                    if ips:
+                        pins[a] = ips
+                except Exception:
+                    continue
+        return pins
+
+    async def resolved_upstream_ips(self) -> list[str]:
+        """Flat list of every concrete upstream proxy IP (v4.8.0).
+
+        This is what the tunnel's anti-loop host routes must be built
+        from: every possible dial target, resolved BEFORE the default
+        route is hijacked.  Entries that stay unresolved (offline
+        resolver) contribute nothing - the worker refuses to raise the
+        tunnel when the resulting set would be incomplete for
+        hostname-based entries."""
+        pins = await self.upstream_pins()
+        out = []
+        for ips in pins.values():
+            for ip in ips:
+                if ip not in out:
+                    out.append(ip)
+        return out
 
     # ----------------------------------------------------------- breaker
     def _pick_server(self):

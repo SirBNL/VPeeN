@@ -68,6 +68,34 @@ RESOLVE_TIMEOUT = 5.0
 _resolve_cache: "dict[str, tuple[float, list[str]]]" = {}
 _resolve_inflight: "dict[str, asyncio.Task]" = {}
 
+# v4.8.0 "Sentinel" -------------------------------------------------------
+# Resolver PINS for proxy hostnames.  While the TUN layer is up, the whole
+# point of the anti-loop host routes is that dials to upstream proxy IPs
+# bypass the tunnel.  But the factory re-resolves proxy hostnames every
+# RESOLVE_TTL via the SYSTEM resolver - which, once the default route is
+# hijacked, goes through the tunnel's own DNS relay and can come back with
+# a DIFFERENT (round-robin) A record that has no host route -> the dial
+# loops back into the tunnel -> total blackhole.
+#
+# The core therefore snapshots every proxy hostname to its concrete IPs
+# BEFORE the routes are hijacked (pre-hijack resolution is guaranteed to
+# use the real resolver) and pins them here.  Pinned hostnames never hit
+# the live resolver; credentials rotation replaces the pin map wholesale
+# (the fresh hostnames resolve through the relayed path, which is fine -
+# the rotation code installs their host routes in the same pass).
+_resolve_pins: "dict[str, list[str]]" = {}
+
+
+def pin_hostnames(pins: "dict[str, list[str]]") -> None:
+    """Replace the resolver pin table (core owns the lifecycle)."""
+    global _resolve_pins
+    _resolve_pins = dict(pins or {})
+
+
+def clear_pins() -> None:
+    pin_hostnames({})
+
+
 # Tests replace this to fake the resolver; production uses the loop's
 # getaddrinfo (which runs in the default executor).
 _getaddrinfo_hook = None
@@ -129,9 +157,14 @@ async def resolve_host(host: str) -> list[str]:
     IP literals return immediately (no resolver, no thread hop, no cache).
     Singleflight: while one resolve is in flight every other caller for
     the same host awaits the SAME task instead of piling 30 getaddrinfo
-    calls onto the thread pool during a browsing burst."""
+    calls onto the thread pool during a browsing burst.
+    v4.8.0: pinned hostnames (tunnel anti-loop protection) return the
+    pinned snapshot and never touch the live resolver."""
     if _is_ip_literal(host):
         return [host]
+    pinned = _resolve_pins.get(host)
+    if pinned:
+        return list(pinned)
     hit = _resolve_cache.get(host)
     if hit is not None and time.monotonic() < hit[0]:
         return hit[1]

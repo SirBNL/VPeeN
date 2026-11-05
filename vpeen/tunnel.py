@@ -73,6 +73,20 @@ def platform_key() -> str:
     return "linux-amd64" if "64" in machine else "linux-x86"
 
 
+def _valid_route_ip(ip: str) -> bool:
+    """True for a concrete IPv4 literal usable as a host-route target.
+
+    v4.8.0: the anti-loop contract demands that everything passed to the
+    platform route commands is a real IPv4 (hostnames make `ip route`
+    fail outright and route.exe resolve inconsistently; IPv6 upstreams
+    cannot be protected by this IPv4-only TUN setup)."""
+    import ipaddress
+    try:
+        return ipaddress.ip_address(str(ip).strip()).version == 4
+    except (ValueError, AttributeError):
+        return False
+
+
 def binary_paths():
     """Locate tun2socks (+wintun dir) for this platform, frozen or source."""
     key = platform_key()
@@ -116,12 +130,16 @@ class TunnelWorker:
         self.journal = None
         self.socks_port = 1080
         self.upstream_ips: list[str] = []
+        self.upstream_hosts: dict = {}        # v4.8.0: hostname -> pinned IPs
+        self.strict_ips = False              # v4.8.0: hostnames were seen ->
+                                             # an empty IP set is FATAL
         self.dns_enabled = True
         self.mtu = 1500
         self._tasks: set = set()            # anchored tasks (asyncio keeps
         self._tun2socks_logf = None        # only weak refs - unanchored
                                             # tasks can be GC'd mid-flight)
         self._up_task = None               # in-flight "up" guard (v4.2.2)
+        self._upd_task = None              # v4.8.0: in-flight "upd" guard
 
     # ------------------------------------------------------------- lifecycle
     def _spawn(self, coro):
@@ -216,7 +234,13 @@ class TunnelWorker:
             cfg = msg.get("cfg", {})
             self.socks_port = int(cfg.get("socks_port", 1080))
             self.mtu = int(cfg.get("mtu", 1500))
-            self.upstream_ips = list(cfg.get("upstream_ips", []))
+            self.upstream_ips = [ip for ip in cfg.get("upstream_ips", [])
+                                if isinstance(ip, str)]
+            hosts = cfg.get("upstream_hosts") or {}
+            self.upstream_hosts = {str(k): [str(x) for x in v]
+                                  for k, v in hosts.items() if v} \
+                if isinstance(hosts, dict) else {}
+            self.strict_ips = bool(cfg.get("strict_ips", False))
             self.dns_enabled = bool(cfg.get("dns", True))
             # v4.2.2: guard against two "up" commands racing - the old code
             # spawned _up() for each, and two concurrent runs could launch
@@ -227,8 +251,18 @@ class TunnelWorker:
             self.last_ping = time.time()
             self._spawn(self._down("requested by app"))
         elif cmd == "upd":
-            self.upstream_ips = list(msg.get("upstream_ips", []))
-            self._spawn(self._refresh_host_routes())
+            self.last_ping = time.time()
+            self.upstream_ips = [ip for ip in msg.get("upstream_ips", [])
+                                if isinstance(ip, str)]
+            hosts = msg.get("upstream_hosts") or {}
+            if isinstance(hosts, dict):
+                self.upstream_hosts = {str(k): [str(x) for x in v]
+                                       for k, v in hosts.items() if v}
+            # v4.8.0: same guard as "up" - two rotations in flight could
+            # interleave route deletes/adds and leave the journal pointing
+            # at routes that no longer exist.
+            if self._upd_task is None or self._upd_task.done():
+                self._upd_task = self._spawn(self._refresh_host_routes())
         elif cmd == "quit":
             await self._down("quit command")
             os._exit(0)
@@ -268,6 +302,20 @@ class TunnelWorker:
             if not plat.is_admin():
                 raise OSError("worker is not elevated")
 
+            # v4.8.0 "Sentinel" - THE anti-loop contract:
+            # raising the default-route hijack with an empty/invalid
+            # upstream IP set means every upstream dial loops back into
+            # the tunnel: "connected" with a dead network.  When the GUI
+            # says hostname-based servers were involved (strict_ips), a
+            # resolved-IP set that is empty is FATAL - refuse to hijack.
+            routable = [ip for ip in self.upstream_ips
+                        if _valid_route_ip(ip)]
+            if not routable and self.strict_ips:
+                raise OSError(
+                    "upstream server IPs could not be resolved - refusing "
+                    "to raise the tunnel (it would blackhole all traffic); "
+                    "try again or use proxy mode")
+
             # 0. discover original route BEFORE any changes
             device = self._device_arg()
             if not device:
@@ -276,12 +324,14 @@ class TunnelWorker:
             # 1. launch tun2socks (it creates the TUN adapter itself).
             #    v4.2.0: its output now goes to tun2socks.log instead of
             #    DEVNULL so failures are actually diagnosable.
+            #    v4.8.0: --interface is GONE.  The SOCKS server it dials is
+            #    loopback (127/8 beats the /1 hijack routes), and binding
+            #    its outbound socket to the physical interface was pure
+            #    risk on some stacks (a loopback destination through a
+            #    bound physical interface is not guaranteed to work).
             args = [exe, "--device", device,
                     "--proxy", f"socks5://127.0.0.1:{self.socks_port}",
                     "--mtu", str(self.mtu), "--loglevel", "info"]
-            bind_if = self._orig_bind_interface()
-            if bind_if:
-                args += ["--interface", bind_if]
             self.blog(f"starting tun2socks: {' '.join(args)}")
             flags = 0
             if os.name == "nt":
@@ -300,7 +350,9 @@ class TunnelWorker:
             #    address is only assigned by bring_up() BELOW - so the wait
             #    timed out every single time and tunnel mode never came up.
             await self._wait_adapter()
-            journal, ok, err = plat.bring_up(self.mtu, self.upstream_ips)
+            journal, ok, err = plat.bring_up(self.mtu,
+                                            [ip for ip in self.upstream_ips
+                                             if _valid_route_ip(ip)])
             if journal is None:
                 raise OSError(err or "route setup failed")
             self.journal = journal
@@ -313,16 +365,38 @@ class TunnelWorker:
             # sanity: the address should now be present (netsh/ip are sync)
             await self._verify_address()
 
-            # 3. DNS relay bound to the TUN address (through local SOCKS5)
+            # 2. DNS relay bound to the TUN address (through local SOCKS5).
+            #    v4.8.0 ORDER FIX: the relay must be LISTENING before the
+            #    system DNS is pointed at it.  The old order swapped
+            #    resolv.conf / macOS DNS inside bring_up and then started
+            #    the relay - a bind failure (53 already taken) left the
+            #    whole machine with dead DNS while the tunnel was up.
+            #    The swap now happens BELOW, only after a live relay exists,
+            #    and is journaled exactly like a route so teardown/crash
+            #    recovery restores it.
+            relay_ok = False
             if self.dns_enabled:
                 from .dnsrelay import DNSRelay
                 self.relay = DNSRelay(socks_dial=self._socks_dial,
                                       bind_ip=plat.TUN_IP, port=53,
-                                      log=self.blog)
+                                      log=self.blog,
+                                      pins=self.upstream_hosts)
                 try:
                     await self.relay.start()
+                    relay_ok = True
                 except OSError as e:
-                    self.blog(f"DNS relay failed to bind: {e}", "warn")
+                    self.blog(f"DNS relay failed to bind: {e} - system DNS "
+                              "stays on the physical resolver (queries "
+                              "leak to your ISP, traffic stays protected)",
+                              "warn")
+                    self.relay = None
+            if relay_ok:
+                if plat.apply_dns(self.journal):
+                    self.blog("System DNS now resolves through the tunnel.",
+                              "ok")
+                else:
+                    self.blog("DNS swap skipped/failed - keeping the physical "
+                              "resolver for now.", "warn")
 
             self.state = "up"
             self.broadcast({"ev": "up"})
@@ -511,6 +585,10 @@ class TunnelWorker:
             fresh = []
             orig = self._orig_route_triple()
             for ip in self.upstream_ips:
+                # v4.8.0: never hand a hostname (or a v6 literal) to the
+                # route commands - both silently fail today.
+                if not _valid_route_ip(ip):
+                    continue
                 if orig is None:
                     break
                 if sys_platform.startswith("win"):
@@ -691,11 +769,14 @@ class TunnelController:
 
     # --------------------------------------------------------------- connect
     def connect(self, socks_port: int, upstream_ips: list[str],
-                mtu: int = 1500, dns: bool = True) -> None:
+                upstream_hosts: "dict[str, list[str]] | None" = None,
+                mtu: int = 1500, dns: bool = True,
+                strict_ips: bool = False) -> None:
         if self.state in ("starting", "up"):
             return
         threading.Thread(target=self._connect_sync,
-                         args=(socks_port, upstream_ips, mtu, dns),
+                         args=(socks_port, upstream_ips, upstream_hosts,
+                               mtu, dns, strict_ips),
                          daemon=True, name="vpeen-tunnelctl").start()
 
     def _elevated_spawn(self, args: list[str]) -> None:
@@ -730,7 +811,8 @@ class TunnelController:
             subprocess.run(["pkexec", "sh", "-c", script],
                            check=True, timeout=120, capture_output=True)
 
-    def _connect_sync(self, socks_port, upstream_ips, mtu, dns):
+    def _connect_sync(self, socks_port, upstream_ips, upstream_hosts,
+                      mtu, dns, strict_ips):
         try:
             ok, why = tunnel_available()
             if not ok:
@@ -763,6 +845,8 @@ class TunnelController:
             self._wfile.flush()
 
             self._cfg = {"socks_port": socks_port, "upstream_ips": upstream_ips,
+                         "upstream_hosts": upstream_hosts or {},
+                         "strict_ips": bool(strict_ips),
                          "mtu": mtu, "dns": dns}
             self._send({"cmd": "up", "cfg": self._cfg})
             self._start_threads()
@@ -847,9 +931,13 @@ class TunnelController:
         self._sock = None
 
     # -------------------------------------------------------------- actions
-    def update_servers(self, upstream_ips: list[str]) -> None:
+    def update_servers(self, upstream_ips: list[str],
+                        upstream_hosts: "dict[str, list[str]] | None" = None) -> None:
         if self.state == "up":
-            self._send({"cmd": "upd", "upstream_ips": upstream_ips})
+            msg = {"cmd": "upd", "upstream_ips": upstream_ips}
+            if upstream_hosts:
+                msg["upstream_hosts"] = upstream_hosts
+            self._send(msg)
 
     def disconnect(self) -> None:
         if self.state in ("starting", "up"):

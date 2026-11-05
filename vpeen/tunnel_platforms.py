@@ -249,14 +249,28 @@ def _win_tun_index() -> int | None:
     return None
 
 
-def win_up(mtu, upstream_ips, orig=None):
-    """Bring up Windows TUN routes. Returns (session_dict, ok, err)."""
+def win_up(mtu, upstream_ips, orig=None, commit=None):
+    """Bring up Windows TUN routes. Returns (session_dict, ok, err).
+
+    v4.8.0: `commit` (when provided) is invoked after EVERY journaled
+    mutation with the journal-so-far, so the crash-recovery session file
+    always reflects routes that are already live on the system.  The old
+    code saved the journal once at the END of bring_up - a crash between
+    `route add 0.0.0.0/1` and the save left an UNRECOVERABLE hijack (the
+    startup sweep had nothing to replay)."""
     orig = orig or _win_orig_route()
     if not orig:
         return None, False, "could not detect the default gateway/interface"
     gw, alias, idx = orig
     tun = TUN_NAME["win32"]
     journal = {"routes": [], "iface": tun, "ip": TUN_IP}
+
+    def _commit():
+        if commit is not None:
+            try:
+                commit(journal)
+            except Exception as e:
+                _log(f"journal commit failed: {e}", "warn")
 
     # 1. static address + adapter-scoped DNS on the TUN adapter only
     #    (one retry - a brand-new wintun adapter is occasionally not ready
@@ -269,6 +283,7 @@ def win_up(mtu, upstream_ips, orig=None):
         time.sleep(1.0)
         rc, _, err = run(addr_cmd, check=True)
     journal["routes"].append({"type": "addr", "iface": tun})
+    _commit()
     # v4.2.2: this used to be run(..., check=True) - a failure raised and
     # killed the whole tunnel UP for a purely cosmetic adapter-DNS step.
     # It is best-effort now; the relay still works without it.
@@ -278,6 +293,7 @@ def win_up(mtu, upstream_ips, orig=None):
     if rc != 0:
         _log(f"adapter DNS set failed (non-fatal): {err}", "warn")
     journal["routes"].append({"type": "dnsadapter", "iface": tun})
+    _commit()
 
     tun_idx = _win_tun_index()
     if tun_idx is None:
@@ -296,6 +312,7 @@ def win_up(mtu, upstream_ips, orig=None):
             journal["routes"].append({"type": "route", "prefix": ip,
                                       "mask": "255.255.255.255", "gw": gw,
                                       "metric": "1", "if": idx})
+            _commit()
         else:
             _log(f"host route add failed for {ip}: {err}", "warn")
 
@@ -307,6 +324,7 @@ def win_up(mtu, upstream_ips, orig=None):
             journal["routes"].append({"type": "route", "prefix": prefix,
                                       "mask": "128.0.0.0", "gw": TUN_IP,
                                       "metric": "1", "if": tun_idx})
+            _commit()
         else:
             return journal, False, f"route add {prefix}/1 failed: {err}"
 
@@ -371,7 +389,13 @@ def _linux_dns_restore(step):
         _log(f"resolv.conf restore failed: {e}", "warn")
 
 
-def linux_up(mtu, upstream_ips, orig=None):
+def linux_up(mtu, upstream_ips, orig=None, commit=None):
+    """v4.8.0: `commit` (journal checkpoint, see win_up) + the resolv.conf
+    swap is NO LONGER part of bring_up - the worker applies it separately
+    (plat.apply_dns) only AFTER the DNS relay successfully bound.  The old
+    order swapped resolv.conf to the TUN resolver and THEN tried to bind
+    that resolver; a bind failure (port 53 taken) left the whole machine
+    with dead DNS while the tunnel was up."""
     orig = orig or _linux_orig_route()
     if not orig:
         return None, False, "could not detect the default route"
@@ -379,11 +403,19 @@ def linux_up(mtu, upstream_ips, orig=None):
     tun = TUN_NAME["linux"]
     journal = {"routes": [], "dns": []}
 
+    def _commit():
+        if commit is not None:
+            try:
+                commit(journal)
+            except Exception as e:
+                _log(f"journal commit failed: {e}", "warn")
+
     rc, _, err = run(["ip", "addr", "add", f"{TUN_IP}/15", "dev", tun])
     if rc != 0:
         return journal, False, f"ip addr add failed: {err}"
     run(["ip", "link", "set", tun, "up"])
     journal["routes"].append({"type": "addr", "iface": tun})
+    _commit()
 
     # v4.2.2: remember the ORIGINAL rp_filter value and journal it - the old
     # teardown hardcoded 2 (loose mode) regardless of the machine's policy.
@@ -397,12 +429,14 @@ def linux_up(mtu, upstream_ips, orig=None):
         journal["routes"].append({"type": "sysctl",
                                   "key": f"net.ipv4.conf.{dev}.rp_filter",
                                   "old": orig_rf})
+        _commit()
 
     for ip in upstream_ips:
         rc, _, err = run(["ip", "route", "add", f"{ip}/32", "via", gw])
         if rc == 0:
             journal["routes"].append({"type": "route", "prefix": f"{ip}/32",
                                       "via": gw})
+            _commit()
         else:
             _log(f"host route add failed for {ip}: {err}", "warn")
 
@@ -412,13 +446,11 @@ def linux_up(mtu, upstream_ips, orig=None):
         if rc == 0:
             journal["routes"].append({"type": "route", "prefix": prefix,
                                       "dev": tun})
+            _commit()
         else:
             ok_all = False
             _log(f"route add {prefix} failed: {err}", "err")
 
-    step = _linux_dns_swap()
-    if step:
-        journal["dns"].append(step)
     run(["resolvectl", "flush-caches"]) if shutil.which("resolvectl") else None
     return journal, ok_all, None if ok_all else "some hijack routes failed"
 
@@ -491,7 +523,10 @@ def _mac_dns_restore(journal):
             run(["networksetup", "-setdnsservers", svc, "Empty"])
 
 
-def mac_up(mtu, upstream_ips, orig=None):
+def mac_up(mtu, upstream_ips, orig=None, commit=None):
+    """v4.8.0: `commit` journal checkpoint (see win_up); the system DNS
+    swap is applied separately (plat.apply_dns) after the DNS relay has
+    actually bound - see linux_up for why."""
     orig = orig or _mac_orig_route()
     if not orig:
         return None, False, "could not detect the default route"
@@ -499,16 +534,25 @@ def mac_up(mtu, upstream_ips, orig=None):
     tun = TUN_NAME["darwin"]
     journal = {"routes": [], "dns": []}
 
+    def _commit():
+        if commit is not None:
+            try:
+                commit(journal)
+            except Exception as e:
+                _log(f"journal commit failed: {e}", "warn")
+
     rc, _, err = run(["ifconfig", tun, TUN_IP, TUN_IP, "up"])
     if rc != 0:
         return journal, False, f"ifconfig failed: {err}"
     journal["routes"].append({"type": "addr", "iface": tun})
+    _commit()
 
     for ip in upstream_ips:
         rc, _, err = run(["route", "-n", "add", "-host", ip, gw])
         if rc == 0:
             journal["routes"].append({"type": "route", "kind": "host",
                                       "prefix": ip, "gw": gw})
+            _commit()
         else:
             _log(f"host route add failed for {ip}: {err}", "warn")
 
@@ -522,11 +566,11 @@ def mac_up(mtu, upstream_ips, orig=None):
             journal["routes"].append({"type": "route", "kind": "net",
                                       "prefix": prefix, "gw": TUN_IP,
                                       "iface": tun})
+            _commit()
         else:
             ok_all = False
             _log(f"route add {prefix} failed: {err}", "err")
 
-    journal["dns"].extend(_mac_dns_set(_mac_services()))
     return journal, ok_all, None if ok_all else "some hijack routes failed"
 
 
@@ -547,18 +591,63 @@ def mac_down(journal):
 
 # ============================================================== dispatcher
 def bring_up(mtu, upstream_ips):
-    """Journalized UP for the current OS. Returns (session, ok, err)."""
+    """Journalized UP for the current OS. Returns (session, ok, err).
+
+    v4.8.0: the journal is CHECKPOINTED after every route mutation (the
+    commit callback saves the session file atomically), so a crash at any
+    point leaves a session that exactly matches the routes that are live
+    on the system - the startup sweep can always replay it backwards.
+    The DNS swap is NOT done here anymore (see apply_dns)."""
+
+    def _commit(journal):
+        save_session({"os": sys_platform, "journal": journal})
+
     if sys_platform.startswith("win"):
-        journal, ok, err = win_up(mtu, upstream_ips)
+        journal, ok, err = win_up(mtu, upstream_ips, commit=_commit)
     elif sys_platform == "linux":
-        journal, ok, err = linux_up(mtu, upstream_ips)
+        journal, ok, err = linux_up(mtu, upstream_ips, commit=_commit)
     elif sys_platform == "darwin":
-        journal, ok, err = mac_up(mtu, upstream_ips)
+        journal, ok, err = mac_up(mtu, upstream_ips, commit=_commit)
     else:
         return None, False, f"unsupported platform {sys_platform}"
     if journal is not None:
         save_session({"os": sys_platform, "journal": journal})
     return journal, ok, err
+
+
+def apply_dns(journal) -> bool:
+    """Swap the system DNS to the TUN resolver (v4.8.0).
+
+    Called by the tunnel worker ONLY after the DNS relay successfully
+    bound - a swap without a live relay means a machine that cannot
+    resolve anything for as long as the tunnel is up.  Journaled like
+    every other mutation, so teardown / crash recovery restores it."""
+    try:
+        if sys_platform == "linux":
+            step = _linux_dns_swap()
+            if step:
+                journal.setdefault("dns", []).append(step)
+                save_session({"os": sys_platform, "journal": journal})
+                return True
+        elif sys_platform == "darwin":
+            steps = _mac_dns_set(_mac_services())
+            if steps:
+                journal.setdefault("dns", []).extend(steps)
+                save_session({"os": sys_platform, "journal": journal})
+                return True
+        elif sys_platform.startswith("win"):
+            # Windows DNS is per-adapter: win_up already pointed the TUN
+            # adapter at the relay (dnsadapter step, journaled there).
+            # With the relay now bound that setting is live and correct;
+            # the physical adapters keep their own resolvers, which the
+            # hijack routes tunnel anyway.
+            if any(d.get("type") == "dnsadapter"
+                   for d in journal.get("dns", [])
+                   if isinstance(d, dict)):
+                return True
+    except Exception as e:
+        _log(f"DNS swap failed: {e}", "warn")
+    return False
 
 
 def bring_down(journal):

@@ -17,6 +17,8 @@ Protocol (all JSON, same origin, 127.0.0.1 only):
     POST /api/select          {"region": ...}       (no connect)
     POST /api/pings           {}                    (refresh latencies)
     POST /api/settings        {partial settings}
+    POST /api/update/check   {}   check GitHub for a newer release (v4.8.0)
+    POST /api/update/install {}   download+verify+install+restart (v4.8.0)
     POST /api/quit            {}                    (browser-fallback mode)
 
 Connect semantics mirror the v4.2-4.3 Tk GUI: proxy mode always starts
@@ -122,6 +124,198 @@ def _web_dir() -> str:
     return here
 
 
+# =====================================================================
+# v4.8.0 "Sentinel": self-update flow (web UI side)
+# =====================================================================
+class UpdateFlow:
+    """Drives check -> download -> stage -> install -> restart.
+
+    Everything runs on background threads; every state change is emitted
+    as {"t": "update", ...} so the sheet, the footer chip and the toast
+    stay live.  The DISK swap only happens after the archive passed its
+    SHA256 check, and the restart only after a clean disconnect (tunnel
+    down, system proxy restored, core stopped)."""
+
+    RECHECK_INTERVAL = 6 * 3600      # auto re-check while the app runs
+
+    def __init__(self, log, emit, socks_port_fn, restart_fn, auto=True):
+        self.log = log
+        self.emit = emit
+        self.socks_port_fn = socks_port_fn     # -> int | None (live SOCKS)
+        self.restart_fn = restart_fn           # clean shutdown + execv
+        self.auto = bool(auto)
+        self._lock = threading.Lock()
+        self._st = {"status": "idle", "current": __version__, "latest": "",
+                    "tag": "", "notes": "", "size": 0, "progress": 0,
+                    "error": "", "checksum_error": "",
+                    "source_install": not getattr(sys, "frozen", False)}
+        self._timer = None
+        self._busy = False
+
+    # -------------------------------------------------------------- state
+    def state(self) -> dict:
+        with self._lock:
+            return dict(self._st)
+
+    def _set(self, **patch):
+        with self._lock:
+            self._st.update(patch)
+            st = dict(self._st)
+        self.emit({"t": "update", "update": st})
+
+    # ---------------------------------------------------------------- api
+    def start_check(self, manual: bool = False, delay: float = 0.0):
+        if self._busy:
+            return
+        threading.Thread(target=self._check_worker,
+                         args=(manual, delay), daemon=True,
+                         name="vpeen-update-check").start()
+
+    def start_install(self):
+        if self._busy:
+            return
+        threading.Thread(target=self._install_worker, daemon=True,
+                         name="vpeen-update-install").start()
+
+    def stop(self):
+        if self._timer is not None:
+            self._timer.cancel()
+
+    # ---------------------------------------------------------- internals
+    def _check_worker(self, manual, delay):
+        from . import selfupdate
+        if delay:
+            time.sleep(delay)
+        self._busy = True
+        try:
+            self._set(status="checking", error="")
+            if manual:
+                self.log("Checking GitHub for a newer release...", "info")
+            try:
+                info = selfupdate.check_for_update(
+                    __version__, socks_port=self.socks_port_fn())
+            except selfupdate.UpdateError as e:
+                self._set(status="error", error=str(e))
+                if manual:
+                    self.log(f"Update check failed: {e}", "warn")
+                return
+            if info.get("status") == "latest":
+                self._set(status="latest", latest=info.get("latest", ""))
+                if manual:
+                    self.log(f"You are on the newest release "
+                             f"(v{info.get('latest', '?')}).", "ok")
+                return
+            # available
+            self._set(status="available", latest=info.get("version", ""),
+                      tag=info.get("tag", ""), notes=info.get("notes", ""),
+                      size=info.get("size", 0), error="",
+                      checksum_error=info.get("checksum_error", ""))
+            self.log(f"Update available: v{info.get('version', '?')} "
+                     f"({info.get('size', 0) // (1024 * 1024)} MB).", "ok")
+            if self.auto:
+                self._auto_download(info)
+        finally:
+            self._busy = False
+            self._rearm()
+
+    def _auto_download(self, info):
+        """Pre-fetch the update in the background so the one click is
+        INSTANT (v4.8.0: automatically detect + install; ONE button moves
+        the app to the new version).  Never auto-restarts - the restart is
+        the user's single button."""
+        from . import selfupdate
+        if not info.get("sha256"):
+            # unverifiable release (missing/partial SHA256SUMS.txt): report
+            # it, but never silently download an unverified archive.
+            self._set(status="available", error=info.get("checksum_error",
+                                                          ""))
+            return
+        try:
+            self._fetch_and_stage(info)
+            self._set(status="ready", progress=100)
+            self.log(f"v{info['version']} is downloaded and verified - "
+                     "one click to switch.", "ok")
+        except selfupdate.UpdateError as e:
+            self._set(status="available", progress=0, error=str(e))
+            self.log(f"Background download failed: {e}", "warn")
+        except Exception as e:
+            self._set(status="available", progress=0, error=str(e))
+            self.log(f"Background download failed: {e}", "warn")
+
+    def _fetch_and_stage(self, info) -> dict:
+        from . import selfupdate
+        # SAFETY (v4.8.0 "Sentinel" core promise): a build without a
+        # SHA256 pin from the release's SHA256SUMS.txt is NEVER fetched,
+        # never staged, never installed - no exceptions, no fallback to
+        # "trust the CDN".
+        if not info.get("sha256"):
+            raise selfupdate.UpdateError(
+                info.get("checksum_error") or
+                "no verified checksum for this asset - refusing to install")
+        dest = os.path.join(selfupdate.UPDATE_DIR, info["asset"])
+        total = info.get("size", 0)
+
+        def _prog(done, tot):
+            pct = (done * 100 // tot) if tot else \
+                (done * 100 // max(total, 1))
+            if pct % 5 == 0:                      # throttle UI events
+                self._set(progress=min(pct, 99), status="downloading")
+
+        self._set(status="downloading", progress=0, error="")
+        selfupdate.download_to(info["url"], dest, info.get("sha256", ""),
+                               socks_port=self.socks_port_fn(),
+                               progress=_prog, expected_size=total)
+        self._set(status="staging", progress=100)
+        return selfupdate.stage_archive(dest, info["version"])
+
+    def _install_worker(self):
+        from . import selfupdate
+        if self._busy:
+            return
+        self._busy = True
+        try:
+            if self.state().get("source_install"):
+                raise selfupdate.UpdateError(
+                    "this is a source installation - update with "
+                    "'git pull' (or download a release)")
+            try:
+                info = selfupdate.check_for_update(
+                    __version__, socks_port=self.socks_port_fn())
+            except selfupdate.UpdateError as e:
+                raise selfupdate.UpdateError(f"re-check failed: {e}")
+            if info.get("status") != "available":
+                self._set(status="latest" if info.get("status") == "latest"
+                          else "idle")
+                return
+            version = info["version"]
+            staged = self._fetch_and_stage(info)
+            self._set(status="installing", latest=version)
+            self.log("Installing the verified build...", "info")
+            selfupdate.install_staged(staged, version)
+            self._set(status="restarting", latest=version)
+            self.log(f"Installed v{version} - restarting VPeeN now.", "ok")
+            time.sleep(1.0)                 # let the UI render the message
+            self.restart_fn()
+        except selfupdate.UpdateError as e:
+            self._set(status="error", error=str(e))
+            self.log(f"Update failed: {e}", "err")
+        except Exception as e:               # absolute guard
+            self._set(status="error", error=str(e))
+            self.log(f"Update failed unexpectedly: {e}", "err")
+        finally:
+            self._busy = False
+
+    def _rearm(self):
+        if not self.auto:
+            return
+        if self._timer is not None:
+            self._timer.cancel()
+        self._timer = threading.Timer(self.RECHECK_INTERVAL,
+                                      lambda: self.start_check(False))
+        self._timer.daemon = True
+        self._timer.start()
+
+
 class Bridge:
     """Owns Core + TunnelController and feeds the web UI.
 
@@ -135,6 +329,7 @@ class Bridge:
         self.cfg = cfgmod.load()
         self.core = Core(state_path, insecure)
         self.tunnel = None if demo else self._make_tunnel()
+        self.update = None if demo else self._make_update()
         self.lock = threading.RLock()
         self.seq = 0
         self.ui_events = deque(maxlen=400)     # [(seq, ev), ...]
@@ -173,6 +368,106 @@ class Bridge:
             return TunnelController(self.core.events)
         except Exception:
             return None
+
+    def sweep_tunnel_orphans(self):
+        """v4.8.0 "Sentinel": the crash-recovery sweep that NEVER existed.
+
+        tunnel_sweep was a settings toggle and TunnelController.cleanup_orphans
+        existed - but nothing ever CALLED it, so a crash (or force-quit) while
+        the TUN layer was up left the def1 hijack routes behind: the user's
+        whole network stayed bricked until a manual route cleanup or reboot.
+        Runs in a background thread; only prompts for elevation when a
+        session journal is actually present (a crashed session)."""
+        if self.demo or self.tunnel is None:
+            return
+        if not bool(self.cfg.get("tunnel_sweep", True)):
+            return
+
+        def _run():
+            try:
+                from . import tunnel_platforms as plat
+                if not plat.load_session():
+                    return          # nothing to clean - stay silent
+                self.log("Leftover tunnel state from a crashed session "
+                         "detected - cleaning it up (admin rights may be "
+                         "requested)...", "warn")
+                self.tunnel.cleanup_orphans(log=self.log)
+            except Exception as e:
+                self.log(f"tunnel sweep failed: {e}", "warn")
+
+        threading.Thread(target=_run, daemon=True,
+                         name="vpeen-tunnelsweep").start()
+
+    # ---------------------------------------------------- v4.8.0 self-update
+    def _make_update(self):
+        return UpdateFlow(
+            log=self.log,
+            emit=self.emit,
+            socks_port_fn=self._live_socks_port,
+            restart_fn=self.restart_for_update,
+            auto=bool(self.cfg.get("auto_update", True)))
+
+    def _live_socks_port(self):
+        """The live SOCKS port, but only while the core is actually up.
+
+        The update check falls back to the local SOCKS5 when GitHub is
+        unreachable directly (it often is, on exactly the networks that
+        need a VPN) - a stale port would just add a doomed attempt."""
+        if not self.core.is_busy():
+            return None
+        try:
+            port = (self.listeners.get("socks_port")
+                    or int(self.cfg.get("socks_port", 1080)))
+            return int(port)
+        except (TypeError, ValueError):
+            return None
+
+    def boot_maintenance(self):
+        """v4.8.0 boot sequence (background threads, never blocks the
+        server startup): sweep self-update leftovers, verify a pending
+        swap marker, sweep orphaned tunnel state, then auto-check."""
+        try:
+            from . import selfupdate
+            selfupdate.sweep_leftovers()
+            expected = selfupdate.check_pending(__version__)
+            if expected is not None:
+                if expected == __version__:
+                    self.log(f"Self-update to v{expected} verified - you are "
+                             "on the new build.", "ok")
+                else:
+                    self.log(f"Update expected v{expected} but running "
+                             f"v{__version__} - the swap may have rolled "
+                             "back; check the logs.", "warn")
+        except Exception as e:
+            self.log(f"update sweep failed: {e}", "warn")
+        self.sweep_tunnel_orphans()
+        if self.update is not None and \
+                bool(self.cfg.get("auto_update", True)):
+            self.update.start_check(manual=False, delay=3.0)
+
+    def restart_for_update(self):
+        """Clean restart after a staged swap (called by UpdateFlow).
+
+        Disconnect first so the TUN layer, its routes and any system-proxy
+        setting are restored BEFORE the process image is replaced - a
+        restart that leaks routes is exactly the crash this version
+        fixed."""
+        self.log("Restarting VPeeN to activate the new version...", "ok")
+        try:
+            self.request_disconnect()
+        except Exception:
+            pass
+        if self._tunnel_watchdog is not None:
+            self._tunnel_watchdog.cancel()
+        deadline = time.time() + 6
+        while self.core.is_busy() and time.time() < deadline:
+            time.sleep(0.1)
+        self._stopping = True
+        self.done.set()
+        self.wakeup.set()
+        time.sleep(0.6)          # let the last UI poll render the state
+        from . import selfupdate
+        selfupdate.restart()    # never returns on success
 
     def log(self, line, level="info"):
         ts = time.strftime("%H:%M:%S")
@@ -232,7 +527,9 @@ class Bridge:
         elif kind == "servers_rotated":
             if self.tunnel is not None:
                 try:
-                    self.tunnel.update_servers(ev.get("upstream_ips", []))
+                    self.tunnel.update_servers(
+                        ev.get("upstream_ips", []),
+                        ev.get("upstream_hosts") or {})
                 except Exception:
                     pass
         elif kind == "direct_ip":
@@ -262,7 +559,7 @@ class Bridge:
                 # stay "connecting" until the TUN layer is up (see
                 # _connect_tunnel); the UI is finalized by tunnel events
                 self._pending_tunnel = False
-                self._connect_tunnel()
+                self._connect_tunnel(ev)
                 return
             if self.conn_mode == "tunnel":
                 return          # tunnel event drives the UI
@@ -290,17 +587,43 @@ class Bridge:
             self.emit({"t": "phase", "phase": ph, "detail": detail})
 
     # ----------------------------------------------------------- tunnel glue
-    def _connect_tunnel(self):
+    def _connect_tunnel(self, ev: dict | None = None):
         if self.tunnel is None:
+            return
+        ev = ev or {}
+        # v4.8.0 "Sentinel": read from the PHASE EVENT first, then the
+        # listeners event, and only then the config.  The old code read
+        # self.listeners - which on the FIRST connect was still {} because
+        # "phase=connected" used to arrive BEFORE "listeners" (fixed in
+        # core.py) - so the tunnel worker got an EMPTY upstream_ips list,
+        # installed no anti-loop host routes, and hijacked the default
+        # route anyway: "connected" with a dead network.
+        socks_port = (ev.get("socks_port")
+                      or self.listeners.get("socks_port")
+                      or int(self.cfg.get("socks_port", 1080)))
+        upstream_ips = (ev.get("upstream_ips")
+                        or self.listeners.get("upstream_ips") or [])
+        upstream_hosts = (ev.get("upstream_hosts")
+                          or self.listeners.get("upstream_hosts") or {}) or {}
+        strict_ips = bool(ev.get("strict_ips",
+                                 self.listeners.get("strict_ips", False)))
+        if not upstream_ips:
+            # belt-and-suspenders: never raise the TUN layer without the
+            # anti-loop IP set (the worker double-checks, but the GUI can
+            # stop it earlier with a clearer message).
+            self._tun_failed_fallback("no upstream IPs resolved - "
+                                      "not raising the tunnel (blackhole "
+                                      "guard)")
             return
         self.log("Requesting administrator rights to enable the VPN tunnel...")
         try:
             self.tunnel.connect(
-                socks_port=self.listeners.get("socks_port",
-                                              self.cfg.get("socks_port", 1080)),
-                upstream_ips=self.listeners.get("upstream_ips", []),
+                socks_port=socks_port,
+                upstream_ips=upstream_ips,
+                upstream_hosts=upstream_hosts,
                 mtu=int(self.cfg.get("tunnel_mtu", 1500)),
-                dns=bool(self.cfg.get("tunnel_dns", True)))
+                dns=bool(self.cfg.get("tunnel_dns", True)),
+                strict_ips=strict_ips)
         except Exception as e:
             self._tun_failed_fallback(f"tunnel start failed: {e}")
             return
@@ -575,9 +898,12 @@ class Bridge:
                     errors.append("tunnel_mtu: must be a number 576-65535")
             for key in ("auto_system_proxy", "tunnel_enabled", "tunnel_dns",
                         "tunnel_sweep", "tun_fallback", "save_logs",
-                        "auto_connect"):
+                        "auto_connect", "auto_update"):
                 if key in patch:
                     cfg[key] = bool(patch[key])
+                if key == "auto_update" and self.update is not None:
+                    # apply immediately so the periodic check honours it
+                    self.update.auto = bool(cfg[key])
             if errors:
                 return errors
             if cfg.get("socks_port") == cfg.get("http_port"):
@@ -613,6 +939,8 @@ class Bridge:
                 "listeners": dict(self.listeners),
                 "system_proxy": self.system_proxy,
                 "tunnel_available": self._tunnel_available(),
+                "update": (self.update.state() if self.update is not None
+                           else {"status": "disabled"}),
                 "seq": self.seq,
                 "logs": list(self.logs)[-60:],
             }
@@ -634,6 +962,11 @@ class Bridge:
         self._stopping = True
         self.done.set()
         self.wakeup.set()
+        if self.update is not None:
+            try:
+                self.update.stop()
+            except Exception:
+                pass
         try:
             self.request_disconnect()
         except Exception:
@@ -894,6 +1227,23 @@ class WebUI:
                     bridge.log("Shut down requested from the UI.", "info")
                     threading.Thread(target=bridge.stop, daemon=True).start()
                     return
+                if path == "/api/update/check":
+                    if bridge.update is None:
+                        return self._json({"ok": False,
+                                            "error": "demo mode"}, 400)
+                    bridge.update.start_check(manual=True)
+                    return self._json({"ok": True})
+                if path == "/api/update/install":
+                    if bridge.update is None:
+                        return self._json({"ok": False,
+                                            "error": "demo mode"}, 400)
+                    if bridge.update.state().get("source_install"):
+                        return self._json({"ok": False,
+                                            "error": "source installation - "
+                                                     "update with git pull"},
+                                           400)
+                    bridge.update.start_install()
+                    return self._json({"ok": True})
                 return self._json({"error": "unknown endpoint"}, 404)
 
             def _do_pings(self):
@@ -934,6 +1284,10 @@ class WebUI:
             self.bridge.emit({"t": "pings", "pings": dict(DEMO_PINGS)})
             self.bridge.emit({"t": "direct_ip", "ip": DEMO_DIRECT_IP})
         else:
+            # v4.8.0 "Sentinel" boot sequence: sweep update leftovers from a
+            # previous self-update, verify a pending swap, sweep orphaned
+            # tunnel state from a crashed session, THEN auto-check GitHub.
+            self.bridge.boot_maintenance()
             self.bridge.refresh_locations()
             self.bridge.refresh_direct_ip()
         return self

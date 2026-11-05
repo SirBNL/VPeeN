@@ -25,6 +25,10 @@ DEFAULTS = {
     "tunnel_dns": True,            # relay DNS through the tunnel (no leaks)
     "tunnel_mtu": 1500,            # conservative; raise to 8500 if stable
     "tunnel_sweep": True,          # clean orphaned state from a crashed session
+    # --- self-update (v4.8.0 "Sentinel")
+    "auto_update": True,           # check GitHub for a newer release at
+                                    # startup + every 6 h, pre-download it,
+                                    # and offer a one-button switch
 }
 
 

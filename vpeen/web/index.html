@@ -124,7 +124,11 @@
   </div>
   <div class="foot-meta">
     <span id="listeners-meta">SOCKS5 :1080 · HTTP :8080</span>
-    <span class="sep">·</span><span id="ver-meta">v4.4</span>
+    <span class="sep">·</span>
+    <button class="ver-chip" id="btn-ver" title="VPeeN update" aria-label="VPeeN update">
+      <span id="ver-meta">v4.4</span>
+      <span class="upd-dot" id="upd-dot" hidden></span>
+    </button>
   </div>
 </footer>
 
@@ -231,12 +235,51 @@
         </div>
       </div>
 
+      <div class="set-group">
+        <div class="set-group-title">Updates</div>
+        <div class="set-row set-row-t">
+          <label>Automatic updates
+            <span class="set-hint">check GitHub on start + every 6 h, pre-download</span></label>
+          <label class="switch sm"><input type="checkbox" id="set-autoupdate"><span class="track"></span></label>
+        </div>
+      </div>
+
       <div class="set-note" id="set-note"></div>
     </div>
 
     <div class="modal-foot">
       <button class="btn ghost" id="btn-settings-cancel">Cancel</button>
       <button class="btn primary" id="btn-settings-save">Save changes</button>
+    </div>
+  </div>
+</div>
+
+<!-- ======================= update modal (v4.8.0) ======================= -->
+<div class="modal" id="modal-update" role="dialog" aria-modal="true" aria-label="Update VPeeN">
+  <div class="modal-card">
+    <div class="modal-head">
+      <h2>Update VPeeN</h2>
+      <button class="icon-btn" id="btn-update-close" title="Close">
+        <svg viewBox="0 0 24 24"><path d="M18 6L6 18M6 6l12 12"/></svg>
+      </button>
+    </div>
+    <div class="modal-body">
+      <div class="upd-headline">
+        <span class="upd-cur" id="upd-cur">v?</span>
+        <svg class="upd-arrow" viewBox="0 0 24 24"><path d="M5 12h14m-6-6 6 6-6 6"/></svg>
+        <span class="upd-new" id="upd-new">v?</span>
+      </div>
+      <div class="upd-progress" id="upd-progress" hidden>
+        <div class="upd-bar"><div class="upd-fill" id="upd-fill"></div></div>
+        <span class="upd-pct" id="upd-pct">0%</span>
+      </div>
+      <div class="upd-state" id="upd-state">Idle</div>
+      <pre class="upd-notes" id="upd-notes" hidden></pre>
+      <div class="upd-error" id="upd-error" hidden></div>
+    </div>
+    <div class="modal-foot">
+      <button class="btn ghost" id="btn-update-check">Check now</button>
+      <button class="btn primary" id="btn-update-install" disabled>Update &amp; Restart</button>
     </div>
   </div>
 </div>

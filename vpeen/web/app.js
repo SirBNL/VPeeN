@@ -28,6 +28,8 @@ const S = {
   native_window: true,
   version: "",
   listeners: {},
+  update: { status: "idle" },
+  updateToasted: false,
   lastDown: 0,
   lastUp: 0,
   lastDownTs: 0,
@@ -369,7 +371,11 @@ function toggleSheet(name) {
   (document.body.dataset.sheet === name) ? closeSheets() : openSheet(name);
 }
 
-function openModal() { document.body.dataset.modal = "settings"; loadSettingsForm(); }
+function openModal(which = "settings") {
+  document.body.dataset.modal = which;
+  if (which === "settings") loadSettingsForm();
+  if (which === "update") renderUpdate();
+}
 function closeModal() {
   delete document.body.dataset.modal;
   $("set-note").textContent = "";
@@ -404,6 +410,7 @@ function loadSettingsForm() {
   $("set-tunfallback").checked = c.tun_fallback !== false;
   $("set-mtu").value = c.tunnel_mtu ?? 1500;
   $("set-sweep").checked = c.tunnel_sweep !== false;
+  $("set-autoupdate").checked = c.auto_update !== false;
   $("set-note").textContent = "";
 }
 
@@ -417,6 +424,7 @@ async function saveSettingsForm() {
     tun_fallback: $("set-tunfallback").checked,
     tunnel_mtu: parseInt($("set-mtu").value, 10),
     tunnel_sweep: $("set-sweep").checked,
+    auto_update: $("set-autoupdate").checked,
   };
   const r = await api("/api/settings", patch);
   const note = $("set-note");
@@ -444,6 +452,76 @@ function updateFootMeta() {
   const c = S.settings || {};
   $("listeners-meta").textContent =
     `SOCKS5 :${c.socks_port ?? 1080} · HTTP :${c.http_port ?? 8080}`;
+}
+
+/* ------------------------------------------------------- update (v4.8.0) */
+const UPD_LABEL = {
+  idle: "No update check has run yet.",
+  checking: "Checking GitHub for a newer release…",
+  latest: (u) => `You are on the newest release (v${u.latest || u.current}).`,
+  available: (u) => u.source_install
+    ? `v${u.latest} is available. This is a source installation — update with ‘git pull’.`
+    : `v${u.latest} is available (${fmtBytes(u.size)}). It downloads automatically; one click switches you over.`,
+  downloading: (u) => `Downloading v${u.latest}… ${u.progress || 0}%`,
+  staging: "Verifying & unpacking the new build…",
+  ready: (u) => `v${u.latest} is downloaded and CHECKSUM-VERIFIED. One click switches you to it.`,
+  installing: (u) => `Installing v${u.latest}…`,
+  restarting: (u) => `Installed v${u.latest} — restarting VPeeN now.`,
+  error: (u) => `Update error: ${u.error || "unknown"}`,
+  disabled: "Update checks are disabled in this build.",
+};
+
+function renderUpdate() {
+  const u = S.update || {};
+  const st = u.status || "idle";
+  const chipDot = $("upd-dot");
+  if (chipDot) {
+    chipDot.hidden = !("available" === st || "downloading" === st
+      || "staging" === st || "ready" === st);
+  }
+  if (document.body.dataset.modal !== "update") return;   // modal closed
+  $("upd-cur").textContent = `v${u.current || S.version || "?"}`;
+  $("upd-new").textContent = `v${u.latest || "?"}`;
+  const stateEl = $("upd-state");
+  const lab = UPD_LABEL[st] || UPD_LABEL.idle;
+  stateEl.textContent = typeof lab === "function" ? lab(u) : lab;
+  stateEl.className = "upd-state" + ((st === "error") ? " err" : "");
+
+  const prog = $("upd-progress");
+  prog.hidden = !(st === "downloading" || st === "staging");
+  $("upd-fill").style.width = `${u.progress || 0}%`;
+  $("upd-pct").textContent = `${u.progress || 0}%`;
+
+  const notes = $("upd-notes");
+  notes.hidden = !u.notes;
+  notes.textContent = u.notes || "";
+
+  const errEl = $("upd-error");
+  const errText = [u.error, u.checksum_error].filter(Boolean).join(" · ");
+  errEl.hidden = !errText;
+  errEl.textContent = errText;
+
+  const btn = $("btn-update-install");
+  const canInstall = (st === "available" || st === "ready" || st === "error")
+    && !u.source_install;
+  btn.disabled = !canInstall;
+  btn.textContent = (st === "ready")
+    ? `Restart to v${u.latest}` : "Update & Restart";
+  $("btn-update-check").disabled = (st === "checking" || st === "downloading"
+    || st === "staging" || st === "installing" || st === "restarting");
+}
+
+async function updateCheckNow() {
+  renderUpdate();
+  try { await api("/api/update/check", {}); } catch { /* state arrives via events */ }
+}
+
+async function updateInstallNow() {
+  const u = S.update || {};
+  toast(u.status === "ready" ? "Restarting VPeeN to the new version…"
+    : "Downloading & installing the update…", "info", 4200);
+  try { await api("/api/update/install", {}); }
+  catch (e) { toast("Could not start the update", "err", 4200); }
 }
 
 /* ------------------------------------------------------------ events */
@@ -516,6 +594,15 @@ function applyEvent(ev) {
       break;
     case "system_proxy":
       break;
+    case "update":                       /* v4.8.0 "Sentinel" self-update */
+      S.update = ev.update || {};
+      renderUpdate();
+      if ((S.update.status === "available" || S.update.status === "ready")
+          && !S.updateToasted) {
+        S.updateToasted = true;
+        toast(`Update available: v${S.update.latest} — one click to install`, "ok", 5200);
+      }
+      break;
   }
 }
 
@@ -563,10 +650,12 @@ async function boot() {
     native_window: !!st.native_window,
     version: st.version,
     tunnel_available: !!st.tunnel_available,
+    update: st.update || { status: "idle" },
     seq: st.seq || 0,
   });
 
   $("ver-meta").textContent = `v${st.version}`;
+  renderUpdate();
   updateFootMeta();
   $("log-lines").textContent = "";
   (st.logs || []).forEach(appendLog);
@@ -631,10 +720,16 @@ $("btn-logs-copy").addEventListener("click", async () => {
   catch { toast("Clipboard unavailable", "err"); }
 });
 
-$("btn-settings").addEventListener("click", openModal);
+$("btn-settings").addEventListener("click", () => openModal("settings"));
 $("btn-settings-close").addEventListener("click", closeModal);
 $("btn-settings-cancel").addEventListener("click", closeModal);
 $("btn-settings-save").addEventListener("click", saveSettingsForm);
+
+/* ---------------------------- update (v4.8.0) ------------------------- */
+$("btn-ver").addEventListener("click", () => openModal("update"));
+$("btn-update-close").addEventListener("click", closeModal);
+$("btn-update-check").addEventListener("click", updateCheckNow);
+$("btn-update-install").addEventListener("click", updateInstallNow);
 
 $("stat-ip-card").addEventListener("click", async () => {
   const ip = $("stat-ip").textContent;

@@ -16,13 +16,23 @@ from .cli import DEFAULT_STATE_PATH, validate_bind_security
 from .localproxy import (READ_LIMIT, LocalProxyServer, Stats,
                          TunnelFactory, install_noise_filter)
 from .systemproxy import system_off, system_on
-from .upstream import check_exit_ip, probe_server_latency
+from .upstream import check_exit_ip, pin_hostnames, clear_pins, probe_server_latency
 from .utils import State
 
 PHASE_DISCONNECTED = "disconnected"
 PHASE_CONNECTING = "connecting"
 PHASE_CONNECTED = "connected"
 PHASE_ERROR = "error"
+
+
+def _is_ip_literal_entry(a) -> bool:
+    """True when a server address entry is a bare IP literal."""
+    import ipaddress
+    try:
+        ipaddress.ip_address(str(a).strip("[]"))
+        return True
+    except (ValueError, AttributeError, TypeError):
+        return False
 
 
 class Core:
@@ -40,10 +50,21 @@ class Core:
         self._stop_evt: threading.Event | None = None
         self._loop: asyncio.AbstractEventLoop | None = None
         self._task: asyncio.Task | None = None
+        # v4.8.0: resolved upstream snapshot (anti-loop routes + relay pins)
+        self._upstream_ips: list[str] = []
+        self._upstream_pins: "dict[str, list[str]]" = {}
+        self._strict_ips = False
 
     def upstream_ips(self) -> list[str]:
-        """Current upstream proxy IPs (for tunnel anti-loop host routes)."""
+        """Current upstream proxy IPs (for tunnel anti-loop host routes).
+
+        v4.8.0: returns the RESOLVED IP snapshot computed at connect (and
+        refreshed on credential rotation), not the raw server addresses -
+        those can be hostnames, which route/ip cannot use for host routes
+        and which rotate under round-robin DNS after the hijack."""
         try:
+            if self._upstream_ips:
+                return list(self._upstream_ips)
             return self.factory.upstream_ips() if self.factory else []
         except Exception:
             return []
@@ -91,9 +112,72 @@ class Core:
         self._emit(type="log", ts=time.strftime("%H:%M:%S"), level=level, line=msg)
 
     def _on_servers_rotated(self, new_servers):
-        """Upstream credentials were refreshed - notify the tunnel layer."""
+        """Upstream credentials were refreshed - notify the tunnel layer.
+
+        v4.8.0: the rotation runs inside the asyncio loop, so the pin /
+        route refresh is done as a task; the event itself is emitted after
+        the fresh resolved-IP snapshot is ready (the worker's host-route
+        refresh must never see a stale/empty IP list - that was the v4.7
+        blackhole: rotation with hostname 'IPs' silently deleted and
+        re-added nothing on Linux)."""
         self.log("Upstream server list was refreshed (credentials rotated).")
-        self._emit(type="servers_rotated", upstream_ips=self.upstream_ips())
+        loop = self._loop
+        if loop is not None:
+            try:
+                loop.call_soon_threadsafe(
+                    lambda: asyncio.ensure_future(self._rotate_pins()))
+            except RuntimeError:
+                pass
+
+    async def _rotate_pins(self):
+        """Recompute resolver pins + resolved IP snapshot after rotation."""
+        factory = self.factory
+        if factory is None:
+            return
+        try:
+            pins = await factory.upstream_pins()
+            pin_hostnames(pins)
+            self._upstream_pins = pins
+            self._upstream_ips = await factory.resolved_upstream_ips()
+        except Exception as e:
+            self.log(f"pin refresh failed (routes may be stale): {e}", "warn")
+            return
+        self._emit(type="servers_rotated", upstream_ips=self.upstream_ips(),
+                    upstream_hosts=self._upstream_pins)
+
+    async def _snapshot_upstream(self, factory) -> None:
+        """v4.8.0: resolve every upstream address to concrete IPs BEFORE any
+        traffic flows and pin them in the resolver.
+
+        Pre-hijack resolution is the ONLY guaranteed-clean moment: after
+        the TUN routes go in, proxy-hostname lookups would travel through
+        the tunnel's DNS relay and could return round-robin records with
+        no host route - a guaranteed blackhole.  Pinned entries never
+        re-resolve, so every dial stays on a routed IP."""
+        try:
+            pins = await factory.upstream_pins()
+        except Exception:
+            pins = {}
+        pin_hostnames(pins)
+        self._upstream_pins = pins
+        try:
+            self._upstream_ips = await factory.resolved_upstream_ips()
+        except Exception:
+            self._upstream_ips = []
+        # v4.8.0: hostname-based entries present?  then the tunnel MUST
+        # have a resolved-IP set or it must refuse to hijack (blackhole).
+        try:
+            self._strict_ips = any(
+                not _is_ip_literal_entry(a)
+                for s in factory.servers for a in (s.get("addresses") or []))
+        except Exception:
+            self._strict_ips = False
+        if self._upstream_ips:
+            self.log(f"Upstream servers resolve to {len(self._upstream_ips)} "
+                     f"concrete IP(s) - tunnel routes will pin them.", "ok")
+        else:
+            self.log("Upstream IPs could not be pre-resolved - tunnel mode "
+                     "would blackhole; reporting unavailable.", "warn")
 
     async def _verify_exit_ip(self) -> None:
         """v4.5.0: background exit-IP verification (bounded, 2 servers).
@@ -192,6 +276,12 @@ class Core:
                                     on_refresh=self._on_servers_rotated,
                                     log=self.log)
             self.factory = factory
+            # v4.8.0 "Sentinel": pre-resolve + pin every upstream address
+            # BEFORE the listeners are declared (and before the TUN layer
+            # ever exists).  This snapshot is what the tunnel's anti-loop
+            # host routes are built from, and the pins keep every later
+            # dial on those exact IPs.
+            await self._snapshot_upstream(factory)
             # v4.5.0 "Velocity": rank servers by measured RTT (fastest-first,
             # sticky) and start warming the TLS pool immediately.
             factory.start_latency_probe()
@@ -247,9 +337,26 @@ class Core:
                 except Exception as e:
                     self.log(f"Could not set system proxy: {e}", "err")
 
-            self._emit(type="phase", phase=PHASE_CONNECTED, region=region)
-            self._emit(type="listeners", socks_port=socks_port, http_port=http_port,
-                       upstream_ips=self.upstream_ips())
+            # v4.8.0 CRITICAL ORDER FIX: the LISTENERS event is emitted
+            # BEFORE "phase=connected".  The bridge raises the TUN layer
+            # synchronously inside the phase handler (pending_tunnel), so
+            # with the old order self.listeners was still the PREVIOUS
+            # connect's dict ({} on the first connect) - the tunnel worker
+            # then got an EMPTY upstream_ips list, installed zero anti-loop
+            # host routes, hijacked the default route anyway, and every
+            # upstream dial looped back into the tunnel: "connected" with
+            # a dead network.  Payload is also embedded in the phase event
+            # itself as belt-and-suspenders.
+            self._emit(type="listeners", socks_port=socks_port,
+                       http_port=http_port,
+                       upstream_ips=self.upstream_ips(),
+                       upstream_hosts=self._upstream_pins,
+                       strict_ips=self._strict_ips)
+            self._emit(type="phase", phase=PHASE_CONNECTED, region=region,
+                       socks_port=socks_port,
+                       upstream_ips=self.upstream_ips(),
+                       upstream_hosts=self._upstream_pins,
+                       strict_ips=self._strict_ips)
 
             # live stats feed until stop is requested
             last_failed = 0
@@ -324,6 +431,12 @@ class Core:
                     pass
             self.factory = None
             self.stats = None
+            # v4.8.0: drop the resolver pins with the factory they belong to
+            # (a stale pin table would survive into the next session and
+            # pin hostnames the new server list may no longer contain).
+            clear_pins()
+            self._upstream_ips = []
+            self._upstream_pins = {}
             # ---- graceful, warning-free shutdown ----
             # NOTE: on Python 3.12.1+ Server.wait_closed() waits for ALL
             # client handlers, so handlers must be cancelled+reaped BEFORE

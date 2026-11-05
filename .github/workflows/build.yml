@@ -10,6 +10,41 @@ permissions:
   contents: write
 
 jobs:
+  # v4.8.0 "Sentinel": the release gate.  Every portable verification
+  # suite must pass BEFORE anything is packaged or published - a release
+  # is created only when build (3 platforms) AND test are green.
+  # "maybe it works" is not a shippable state.
+  test:
+    name: Test gate (full regression)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Compile every module (syntax gate)
+        run: python -m compileall -q vpeen scripts
+
+      - name: Tunnel-mode verification (v4.8.0 root-cause fixes)
+        run: python scripts/test_tunnel_fixes.py
+
+      - name: Self-update verification (check/download/verify/swap)
+        run: python scripts/test_selfupdate.py
+
+      - name: Speed & quality pass regression
+        run: python scripts/test_speed_pass.py
+
+      - name: Fix-pack regression
+        run: python scripts/test_vpeen_fixes.py
+
+      - name: Integration regression
+        run: python scripts/test_vpeen_integration.py
+
+      - name: Web UI regression (demo mode)
+        run: python scripts/test_webui_demo.py
+
   build:
     name: Build (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
@@ -118,7 +153,10 @@ jobs:
 
   release:
     name: Release
-    needs: build
+    # v4.8.0 "Sentinel": gated on the full test suite too - a failing
+    # regression anywhere means NO release, period (0.001% doubt = no
+    # publish).
+    needs: [build, test]
     runs-on: ubuntu-latest
     if: startsWith(github.ref, 'refs/tags/v')
     steps:
@@ -137,6 +175,21 @@ jobs:
         with:
           merge-multiple: true
           path: release
+
+      # v4.8.0 "Sentinel": checksum every asset.  The in-app self-updater
+      # refuses to install ANY release that lacks a matching SHA256SUMS.txt
+      # entry - integrity between CI and the user's disk is the contract
+      # that makes one-click updates safe.
+      - name: Generate SHA256SUMS.txt
+        run: |
+          cd release
+          sha256sum * > ../release-tmp/SHA256SUMS.txt
+          cd ../release-tmp
+          cat SHA256SUMS.txt
+          # the updater never verifies the sums file against itself
+          grep -v ' SHA256SUMS.txt$' SHA256SUMS.txt > SHA256SUMS.tmp || true
+          [ -s SHA256SUMS.tmp ] || cp SHA256SUMS.txt SHA256SUMS.tmp
+          mv SHA256SUMS.tmp SHA256SUMS.txt
 
       - name: Attach binaries to GitHub Release
         uses: softprops/action-gh-release@v2
