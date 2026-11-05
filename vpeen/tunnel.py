@@ -308,9 +308,12 @@ class TunnelWorker:
             # the tunnel: "connected" with a dead network.  When the GUI
             # says hostname-based servers were involved (strict_ips), a
             # resolved-IP set that is empty is FATAL - refuse to hijack.
+            # And when the list was NON-empty but nothing in it is a
+            # usable IPv4 literal (e.g. v6-only upstreams), the hijack
+            # would have the same blackhole: refuse that too, always.
             routable = [ip for ip in self.upstream_ips
                         if _valid_route_ip(ip)]
-            if not routable and self.strict_ips:
+            if not routable and (self.strict_ips or self.upstream_ips):
                 raise OSError(
                     "upstream server IPs could not be resolved - refusing "
                     "to raise the tunnel (it would blackhole all traffic); "

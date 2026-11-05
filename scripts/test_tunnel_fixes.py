@@ -341,6 +341,22 @@ async def test_worker_up_sequence():
                   str(calls["apply_dns"]))
         finally:
             FakeRelay.fail_to_bind = False
+
+        # --- 4h: v6-only 'IPs' (non-strict) also refuse the hijack:
+        # an IPv4-only TUN cannot protect them with host routes either
+        calls["bring_up"].clear()
+        calls["events"].clear()
+        w4 = tun_mod.TunnelWorker(0, "tok")
+        w4.blog = lambda msg, lvl="info": calls["events"].append((lvl, msg))
+        w4.socks_port = 1080
+        w4.upstream_ips = ["2001:db8::1"]          # v6 literal, no hostnames
+        w4.strict_ips = False
+        await drive(w4._up())
+        check("4h all-unroutable IP set (v6-only) -> refused",
+              not calls["bring_up"] and
+              any("refusing" in m for _, m in calls["events"]
+                  if isinstance(m, str)),
+              str(calls["events"])[-200:])
     finally:
         tun_mod.subprocess.Popen = saved["popen"]
         plat.bring_up = saved["bring_up"]
