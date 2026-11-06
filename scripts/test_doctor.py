@@ -259,6 +259,14 @@ def test_frontend():
     check("3e doctor rows styled for all three statuses",
           ".dr-row.ok" in css and ".dr-row.warn" in css
           and ".dr-row.fail" in css)
+    # v4.9.1 regression: the modal open-state CSS only listed settings and
+    # update, so the doctor modal opened INVISIBLE (opacity:0, no pointer
+    # events) and the shield button appeared to do nothing.
+    check("3e2 the doctor modal actually becomes visible when opened",
+          'body[data-modal="doctor"] #modal-doctor { opacity: 1'
+          in css.replace("\n", " ")
+          and 'body[data-modal="doctor"] #modal-doctor .modal-card'
+          in css.replace("\n", " "))
     for key in ("doctor_title", "doctor_run", "doctor_running",
                 "doctor_idle", "doctor_st_ok", "doctor_st_warn",
                 "doctor_st_fail", "dr_listeners", "dr_ip_split",

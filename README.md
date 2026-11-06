@@ -89,6 +89,10 @@ flowchart LR
 
 <img src="docs/screenshot-locations.png" width="32%"/> <img src="docs/screenshot-logs.png" width="32%"/> <img src="docs/screenshot-settings.png" width="32%"/>
 
+**v4.9 “Sangar”** — the Doctor self-check · the Persian (RTL) UI
+
+<img src="docs/screenshot-doctor.png" width="26%"/> <img src="docs/screenshot-fa.png" width="47%"/>
+
 </div>
 
 ## 🚀 Quick Start
@@ -340,7 +344,8 @@ VPeeN/
 
 | Version | Codename | Highlights | Full notes |
 |---|---|---|---|
-| **v4.9.0** | **Sangar** (سنگر) | Windows Setup installer · firewall kill switch · Persian RTL UI · split tunneling · Doctor self-check | [CHANGELOG-v4.9.0.md](CHANGELOG-v4.9.0.md) |
+| **v4.9.1** | **Sangar** patch | Fixed the invisible Doctor modal · Persian font fallback · full-asset checksums + daily release canary | [CHANGELOG-v4.9.1.md](CHANGELOG-v4.9.1.md) |
+| v4.9.0 | Sangar (سنگر) | Windows Setup installer · firewall kill switch · Persian RTL UI · split tunneling · Doctor self-check | [CHANGELOG-v4.9.0.md](CHANGELOG-v4.9.0.md) |
 | v4.8.0 | Sentinel | Tunnel-mode root-cause fixes (the “connected but dead” blackhole, stale hijack routes) · one-click self-updater · CI test gate | [CHANGELOG-v4.8.0.md](CHANGELOG-v4.8.0.md) |
 | v4.7.0 | Nitro | Hedged connects + resolver singleflight — tail latency 8 s → 0.35 s · adaptive warm pool | [CHANGELOG-v4.7.0.md](CHANGELOG-v4.7.0.md) |
 | v4.6.0 | Turbo | 3.4× faster connection setup · throughput-ranked servers · Chrome extension · macOS Gatekeeper fixes | [CHANGELOG-v4.6.0.md](CHANGELOG-v4.6.0.md) |
@@ -506,6 +511,12 @@ SOCKS5 :  socks5://127.0.0.1:1080
 HTTP   :  http://127.0.0.1:8080
 ```
 
+## 🆕 تازه‌های نسخه ۴.۹.۱ (وصلهٔ سنگر)
+
+- 🩺 **رفع باگ پنجرهٔ خودآزمایی** — تو v4.9.0 دکمهٔ سپر ظاهراً هیچ کاری نمی‌کرد (پنجرهٔ نتیجه‌ها به‌خاطر یک قانون CSS جاافتاده، نامرئی می‌شد)؛ الان درست دیده می‌شه.
+- 🇮🇷 **فونت فارسی بهتر** — متن‌های فارسی حالا با فونت وزیرمتن/تاهوما رندر می‌شن (اگه روی سیستمت نصب باشه).
+- 🔐 **سخت‌گیری یکپارچگی انتشار** — هشِ همهٔ فایل‌ها (حتی افزونهٔ کروم) منتشر می‌شه + قناری روزانه سلامت ریلیز رو چک می‌کنه.
+
 ## 🆕 تازه‌های نسخه ۴.۹ (Sangar — سنگر)
 
 - 🪟 **نصب‌کنندهٔ واقعی ویندوز** — فایل `VPeeN-Setup-x.y.z.exe` با میان‌بر منوی استارت،
@@ -577,5 +588,5 @@ HTTP   :  http://127.0.0.1:8080
 <br/>
 <b>⭐ If VPeeN saved you some money, a star is the best thank-you.</b><br/>
 <a href="../../stargazers"><img src="https://img.shields.io/badge/%E2%AD%90-Star%20on%20GitHub-ffcb2f?style=for-the-badge&labelColor=0e1526"/></a>
-<br/><sub>v4.9.0 “Sangar” · pure-Python core · zero-dependency GUI</sub>
+<br/><sub>v4.9.1 “Sangar” · pure-Python core · zero-dependency GUI</sub>
 </div>

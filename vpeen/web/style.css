@@ -22,7 +22,8 @@
   --err: #fb7185;
   --grad: linear-gradient(135deg, #2de3a7 0%, #38bdf8 55%, #818cf8 100%);
   --font: -apple-system, BlinkMacSystemFont, "Segoe UI Variable Display",
-          "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+          "Segoe UI", Roboto, "Helvetica Neue", Arial, Vazirmatn, Tahoma,
+          sans-serif;
   --mono: ui-monospace, "Cascadia Code", SFMono-Regular, Menlo, Consolas,
           monospace;
   --ease: cubic-bezier(.22, 1, .36, 1);
@@ -873,7 +874,8 @@ body[data-sheet="logs"] #sheet-logs { transform: translateX(0); }
   transition: opacity .3s;
 }
 body[data-modal="settings"] #modal-settings,
-body[data-modal="update"] #modal-update { opacity: 1; pointer-events: auto; }
+body[data-modal="update"] #modal-update,
+body[data-modal="doctor"] #modal-doctor { opacity: 1; pointer-events: auto; }
 
 .modal-card {
   width: 470px; max-width: 94vw;
@@ -888,7 +890,8 @@ body[data-modal="update"] #modal-update { opacity: 1; pointer-events: auto; }
   transition: transform .35s var(--ease);
 }
 body[data-modal="settings"] #modal-settings .modal-card,
-body[data-modal="update"] #modal-update .modal-card { transform: translateY(0) scale(1); }
+body[data-modal="update"] #modal-update .modal-card,
+body[data-modal="doctor"] #modal-doctor .modal-card { transform: translateY(0) scale(1); }
 
 .modal-head {
   display: flex; align-items: center; justify-content: space-between;

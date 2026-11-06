@@ -6,5 +6,5 @@ Pure Python. Core = standard library only; GUI is a local web app
 (vpeen/webui + vpeen/web) shown in a pywebview window or the browser.
 """
 
-__version__ = "4.9.0"
+__version__ = "4.9.1"
 __app_name__ = "VPeeN"
