@@ -105,9 +105,10 @@ def main() -> int:
         print(f"DRY RUN - would upload this {SUMS_NAME}:\n{new_text}")
         return 0
 
-    # upload: delete the old asset, then POST the new one (uploads must
-    # run from an environment that can reach uploads.github.com - a
-    # GitHub Actions runner always can; some sandboxes cannot).
+    # upload: delete the old asset, then POST the new one.  Canonical
+    # GitHub upload = RAW body with ?name= in the URL (multipart is not
+    # accepted here).  Run from an environment with unfiltered egress -
+    # a GitHub Actions runner always qualifies; some sandboxes do not.
     rid = rel["id"]
     if SUMS_NAME in names:
         old = next(a for a in assets if a["name"] == SUMS_NAME)
@@ -118,20 +119,19 @@ def main() -> int:
             r.read()
         print(f"deleted old {SUMS_NAME} asset")
 
-    boundary = "vpeensums"
-    body = (f"--{boundary}\r\n"
-            f'Content-Disposition: form-data; name="name"\r\n\r\n{SUMS_NAME}\r\n'
-            f"--{boundary}\r\n"
-            f'Content-Disposition: form-data; name="file"; filename="{SUMS_NAME}"\r\n'
-            f"Content-Type: text/plain\r\n\r\n").encode() + new_text.encode() \
-        + f"\r\n--{boundary}--\r\n".encode()
+    body = new_text.encode()
     req = urllib.request.Request(
-        f"https://uploads.github.com/repos/{REPO}/releases/{rid}",
+        f"https://uploads.github.com/repos/{REPO}/releases/{rid}"
+        f"?name={SUMS_NAME}",
         data=body, method="POST",
-        headers={**_headers(False),
-                 "Content-Type": f"multipart/form-data; boundary={boundary}"})
-    with urllib.request.urlopen(req) as r:
-        created = json.loads(r.read())
+        headers={**_headers(False), "Content-Type": "text/plain"})
+    try:
+        with urllib.request.urlopen(req) as r:
+            created = json.loads(r.read())
+    except urllib.error.HTTPError as e:
+        detail = e.read().decode("utf-8", "replace")[:300]
+        print(f"UPLOAD FAILED (HTTP {e.code}): {detail}", file=sys.stderr)
+        raise
     print(f"uploaded {SUMS_NAME} (asset id {created.get('id')}) covering "
           f"{len(live)} assets")
     print(new_text)
