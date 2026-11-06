@@ -10,8 +10,11 @@ Surgical by design:
     lines are never rewritten
   * if the sums asset is missing entirely it is recreated from all assets
 
-Set DRY_RUN=1 (or --dry-run) to only print the plan.  Uses GITHUB_TOKEN
-from the environment when present.  Standard library only.
+Set DRY_RUN=1 (or --dry-run) to only print the plan.  With --output FILE
+the new sums are written to a file instead of uploading - pair it with
+`gh release upload <tag> FILE --clobber` on a GitHub Actions runner
+(the most robust upload path).  Uses GITHUB_TOKEN from the environment
+when present.  Standard library only.
 """
 from __future__ import annotations
 
@@ -48,6 +51,11 @@ def _get(url: str, binary: bool = False) -> bytes | dict:
 
 def main() -> int:
     dry = "--dry-run" in sys.argv or os.environ.get("DRY_RUN") == "1"
+    out_path = None
+    if "--output" in sys.argv:
+        i = sys.argv.index("--output")
+        out_path = sys.argv[i + 1]
+        dry = False
 
     rel = _get(f"{API}/releases/latest")
     tag = rel.get("tag_name", "?")
@@ -105,6 +113,13 @@ def main() -> int:
         print(f"DRY RUN - would upload this {SUMS_NAME}:\n{new_text}")
         return 0
 
+    if out_path:
+        with open(out_path, "w", newline="\n") as f:
+            f.write(new_text)
+        print(f"wrote {out_path} ({len(live)} assets covered) - "
+              "now `gh release upload <tag> <file> --clobber` it")
+        return 0
+
     # upload: delete the old asset, then POST the new one.  Canonical
     # GitHub upload = RAW body with ?name= in the URL (multipart is not
     # accepted here).  Run from an environment with unfiltered egress -
@@ -124,7 +139,11 @@ def main() -> int:
         f"https://uploads.github.com/repos/{REPO}/releases/{rid}"
         f"?name={SUMS_NAME}",
         data=body, method="POST",
-        headers={**_headers(False), "Content-Type": "text/plain"})
+        headers={**_headers(False),
+                 # the upload endpoint only accepts a binary content
+                 # type for raw uploads - text/plain is rejected with a
+                 # misleading "Multipart form data required"
+                 "Content-Type": "application/octet-stream"})
     try:
         with urllib.request.urlopen(req) as r:
             created = json.loads(r.read())

@@ -6,7 +6,8 @@ name: Release tools
 #
 #   repair-sums  - rebuild SHA256SUMS.txt for the latest release
 #                  (surgical: appends missing entries only, refuses if a
-#                  recorded hash does not match the live asset)
+#                  recorded hash does not match the live asset; uploaded
+#                  with the battle-tested `gh release upload --clobber`)
 
 on:
   workflow_dispatch:
@@ -26,8 +27,20 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Run release_sums tool
-        run: python scripts/release_sums.py
+      - name: Compute the complete sums file
+        run: |
+          python scripts/release_sums.py ${{ inputs.dry_run && '--dry-run' || '--output' }} /tmp/SHA256SUMS.txt
+          if [ ! -f /tmp/SHA256SUMS.txt ]; then
+            echo "no changes needed (or dry run) - nothing to upload"; exit 0
+          fi
+          cat /tmp/SHA256SUMS.txt
+
+      - name: Upload with gh release upload --clobber
+        if: ${{ !inputs.dry_run }}
+        run: |
+          TAG="$(gh release view --json tagName -q .tagName)"
+          echo "repairing sums on ${TAG}"
+          gh release upload "${TAG}" /tmp/SHA256SUMS.txt --clobber
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          DRY_RUN: ${{ inputs.dry_run && '1' || '0' }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
