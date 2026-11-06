@@ -399,7 +399,8 @@ def test_worker_ks():
         check("3a death -> ks_engaged then ks_healed",
               ev_names == ["ks_engaged", "ks_healed"], str(ev_names))
         check("3b containment engaged, released only AFTER repair",
-              engaged == [1] and released == [1] and rebinds == [1])
+              engaged == [1] and released == [1] and rebinds == [1],
+              f"engaged={engaged} released={released} rebinds={rebinds}")
         check("3c worker stays up + healing flag reset",
               w.state == "up" and w._ks_healing is False)
 
@@ -431,7 +432,8 @@ def test_worker_ks():
         check("3d unrepairable -> lockdown event exactly once",
               ev_names == ["ks_engaged", "ks_lockdown"], str(ev_names))
         check("3e lockdown KEEPS the containment (never released)",
-              engaged == [1] and released == [])
+              engaged == [1] and released == [],
+              f"engaged={engaged} released={released}")
         check("3f exactly 3 repair attempts were made",
               len(attempts) == 3 and w2.KS_REPAIR_TRIES == 3)
 

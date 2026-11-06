@@ -455,7 +455,11 @@ class TunnelWorker:
             self.blog(f"tun2socks died (rc={rc}) - kill switch ENGAGED: "
                       "outbound traffic is blocked, not leaked", "err")
             loop = asyncio.get_running_loop()
-            loop.run_in_executor(None, self._ks_engage_containment)
+            # AWAITED (not fire-and-forget): the containment must be
+            # PROVEN active before the repair starts, and proven lifted
+            # before "healed" is broadcast - otherwise the UI could say
+            # "Protected" while the block rule is still up.
+            await loop.run_in_executor(None, self._ks_engage_containment)
             for attempt in range(1, self.KS_REPAIR_TRIES + 1):
                 self.blog(f"kill switch: repairing the tunnel "
                           f"({attempt}/{self.KS_REPAIR_TRIES})...", "warn")
@@ -464,7 +468,8 @@ class TunnelWorker:
                     # containment lifts ONLY after the hijack is proven
                     # back in place - that ordering is what makes the
                     # repair path leak-free.
-                    loop.run_in_executor(None, self._ks_release_containment)
+                    await loop.run_in_executor(
+                        None, self._ks_release_containment)
                     self.broadcast({"ev": "ks_healed"})
                     self.blog("kill switch: tunnel REPAIRED - protection "
                               "restored with no leak window", "ok")
