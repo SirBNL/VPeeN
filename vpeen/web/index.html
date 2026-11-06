@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<html lang="en">
+<html lang="en" dir="ltr">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
@@ -33,14 +33,17 @@
       <path d="M9.4 13.9h5.2" stroke="url(#bgrad)" stroke-width="1.4" stroke-linecap="round"/>
     </svg>
     <span class="brand-name">VPeeN</span>
-    <span class="brand-tag">FREE</span>
+    <span class="brand-tag" data-i18n="brand_tag">FREE</span>
   </div>
   <div class="top-right">
     <div class="status-pill" id="net-pill"><span class="status-dot"></span><span id="net-label">Offline</span></div>
-    <button class="icon-btn" id="btn-logs" title="Connection logs" aria-label="Logs">
+    <button class="icon-btn" id="btn-doctor" data-i18n-title="title_btn_doctor" title="Protection self-check" aria-label="Self-check">
+      <svg viewBox="0 0 24 24"><path d="M12 3l7 2.6v5.1c0 4.3-2.9 7.7-7 9.7-4.1-2-7-5.4-7-9.7V5.6L12 3z"/><path d="M9.2 11.6l2 2 3.6-3.8"/></svg>
+    </button>
+    <button class="icon-btn" id="btn-logs" data-i18n-title="title_btn_logs" title="Connection logs" aria-label="Logs">
       <svg viewBox="0 0 24 24"><path d="M4 17l6-5-6-5M12 19h8"/></svg>
     </button>
-    <button class="icon-btn" id="btn-settings" title="Settings" aria-label="Settings">
+    <button class="icon-btn" id="btn-settings" data-i18n-title="title_btn_settings" title="Settings" aria-label="Settings">
       <svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 1 1-4 0v-.09a1.65 1.65 0 0 0-1-1.51 1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 1 1 0-4h.09a1.65 1.65 0 0 0 1.51-1 1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33h.09a1.65 1.65 0 0 0 1-1.51V3a2 2 0 1 1 4 0v.09a1.65 1.65 0 0 0 1 1.51h.09a1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82v.09a1.65 1.65 0 0 0 1.51 1H21a2 2 0 1 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>
     </button>
   </div>
@@ -87,23 +90,23 @@
   </section>
 
   <section class="stats-row" id="stats-row">
-    <div class="stat" title="Total data downloaded through the tunnel">
-      <div class="stat-label"><svg viewBox="0 0 24 24"><path d="M12 4v12m0 0l-5-5m5 5l5-5M4 20h16"/></svg>Downloaded</div>
+    <div class="stat" data-i18n-title="title_stat_down" title="Total data downloaded through the tunnel">
+      <div class="stat-label"><svg viewBox="0 0 24 24"><path d="M12 4v12m0 0l-5-5m5 5l5-5M4 20h16"/></svg><span data-i18n="stat_down">Downloaded</span></div>
       <div class="stat-value" id="stat-down">0 B</div>
       <div class="stat-note" id="stat-down-note">—</div>
     </div>
-    <div class="stat" title="Total data uploaded through the tunnel">
-      <div class="stat-label"><svg viewBox="0 0 24 24"><path d="M12 20V8m0 0l-5 5m5-5l5 5M4 4h16"/></svg>Uploaded</div>
+    <div class="stat" data-i18n-title="title_stat_up" title="Total data uploaded through the tunnel">
+      <div class="stat-label"><svg viewBox="0 0 24 24"><path d="M12 20V8m0 0l-5 5m5-5l5 5M4 4h16"/></svg><span data-i18n="stat_up">Uploaded</span></div>
       <div class="stat-value" id="stat-up">0 B</div>
       <div class="stat-note" id="stat-up-note">—</div>
     </div>
-    <div class="stat" title="Current session duration">
-      <div class="stat-label"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/></svg>Session</div>
+    <div class="stat" data-i18n-title="title_stat_session" title="Current session duration">
+      <div class="stat-label"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/></svg><span data-i18n="stat_session">Session</span></div>
       <div class="stat-value" id="stat-time">00:00</div>
       <div class="stat-note" id="stat-time-note">not connected</div>
     </div>
-    <div class="stat stat-click" id="stat-ip-card" title="Click to copy">
-      <div class="stat-label"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M3 12h18M12 3a13.5 13.5 0 0 1 0 18M12 3a13.5 13.5 0 0 0 0 18"/></svg>IP Address</div>
+    <div class="stat stat-click" id="stat-ip-card" data-i18n-title="title_stat_ip" title="Click to copy">
+      <div class="stat-label"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M3 12h18M12 3a13.5 13.5 0 0 1 0 18M12 3a13.5 13.5 0 0 0 0 18"/></svg><span data-i18n="stat_ip">IP Address</span></div>
       <div class="stat-value" id="stat-ip">—</div>
       <div class="stat-note" id="stat-ip-note">your real IP</div>
     </div>
@@ -113,19 +116,19 @@
 <!-- ======================= bottom bar ======================= -->
 <footer class="bottombar">
   <div class="modes">
-    <label class="switch" id="sw-system" title="Set the system-wide proxy automatically when connecting (browsers and apps that honour it)">
+    <label class="switch" id="sw-system" data-i18n-title="title_switch_system" title="Set the system-wide proxy automatically when connecting (browsers and apps that honour it)">
       <input type="checkbox" id="in-system"><span class="track"></span>
-      <span class="sw-label">System&nbsp;Proxy</span>
+      <span class="sw-label" data-i18n="switch_system">System&nbsp;Proxy</span>
     </label>
-    <label class="switch" id="sw-tunnel" title="Route ALL device traffic through a VPN tunnel (needs admin)">
+    <label class="switch" id="sw-tunnel" data-i18n-title="title_switch_tunnel" title="Route ALL device traffic through a VPN tunnel (needs admin)">
       <input type="checkbox" id="in-tunnel"><span class="track"></span>
-      <span class="sw-label">VPN&nbsp;Tunnel</span>
+      <span class="sw-label" data-i18n="switch_tunnel">VPN&nbsp;Tunnel</span>
     </label>
   </div>
   <div class="foot-meta">
     <span id="listeners-meta">SOCKS5 :1080 · HTTP :8080</span>
     <span class="sep">·</span>
-    <button class="ver-chip" id="btn-ver" title="VPeeN update" aria-label="VPeeN update">
+    <button class="ver-chip" id="btn-ver" data-i18n-title="title_btn_ver" title="VPeeN update" aria-label="VPeeN update">
       <span id="ver-meta">v4.4</span>
       <span class="upd-dot" id="upd-dot" hidden></span>
     </button>
@@ -138,25 +141,25 @@
 <!-- ======================= servers sheet ======================= -->
 <aside class="sheet" id="sheet-servers" aria-label="Locations">
   <div class="sheet-head">
-    <h2>Locations</h2>
+    <h2 data-i18n="sheet_locations">Locations</h2>
     <span class="count-badge" id="free-count">7 free</span>
     <span class="flex-spacer"></span>
-    <button class="icon-btn" id="btn-refresh" title="Refresh latencies">
+    <button class="icon-btn" id="btn-refresh" data-i18n-title="title_btn_refresh" title="Refresh latencies">
       <svg viewBox="0 0 24 24"><path d="M21 12a9 9 0 1 1-2.64-6.36M21 3v6h-6"/></svg>
     </button>
-    <button class="icon-btn" id="btn-servers-close" title="Close">
+    <button class="icon-btn" id="btn-servers-close" data-i18n-title="title_btn_close" title="Close">
       <svg viewBox="0 0 24 24"><path d="M18 6L6 18M6 6l12 12"/></svg>
     </button>
   </div>
   <div class="search">
     <svg viewBox="0 0 24 24"><circle cx="11" cy="11" r="7"/><path d="M20 20l-4-4"/></svg>
-    <input id="search" type="text" placeholder="Search locations" autocomplete="off" spellcheck="false">
+    <input id="search" type="text" data-i18n-ph="search_ph" placeholder="Search locations" autocomplete="off" spellcheck="false">
   </div>
-  <button class="optimal-card" id="optimal-card" title="Let VPeeN pick the fastest free server">
+  <button class="optimal-card" id="optimal-card" data-i18n-title="title_optimal" title="Let VPeeN pick the fastest free server">
     <span class="opt-icon"><svg viewBox="0 0 24 24"><path d="M13 2L4.5 13.5H11L9.5 22 18 10.5h-6.5L13 2z"/></svg></span>
     <span class="opt-text">
-      <span class="opt-title">Optimal Location</span>
-      <span class="opt-sub">fastest free server</span>
+      <span class="opt-title" data-i18n="optimal_location">Optimal Location</span>
+      <span class="opt-sub" data-i18n="optimal_sub">fastest free server</span>
     </span>
     <span class="opt-ping" id="optimal-ping"><span class="ping-bars" data-level="0"><i></i><i></i><i></i><i></i></span><span class="ms">—</span></span>
   </button>
@@ -168,12 +171,12 @@
 <!-- ======================= logs sheet ======================= -->
 <aside class="sheet sheet-logs" id="sheet-logs" aria-label="Logs">
   <div class="sheet-head">
-    <h2>Connection&nbsp;Logs</h2>
+    <h2 data-i18n="sheet_logs">Connection&nbsp;Logs</h2>
     <span class="flex-spacer"></span>
-    <button class="icon-btn" id="btn-logs-copy" title="Copy log">
+    <button class="icon-btn" id="btn-logs-copy" data-i18n-title="title_btn_copy" title="Copy log">
       <svg viewBox="0 0 24 24"><rect x="9" y="9" width="12" height="12" rx="2"/><path d="M5 15V5a2 2 0 0 1 2-2h10"/></svg>
     </button>
-    <button class="icon-btn" id="btn-logs-close" title="Close">
+    <button class="icon-btn" id="btn-logs-close" data-i18n-title="title_btn_close" title="Close">
       <svg viewBox="0 0 24 24"><path d="M18 6L6 18M6 6l12 12"/></svg>
     </button>
   </div>
@@ -184,62 +187,84 @@
 <div class="modal" id="modal-settings" role="dialog" aria-modal="true" aria-label="Settings">
   <div class="modal-card">
     <div class="modal-head">
-      <h2>Settings</h2>
-      <button class="icon-btn" id="btn-settings-close" title="Close">
+      <h2 data-i18n="settings_title">Settings</h2>
+      <button class="icon-btn" id="btn-settings-close" data-i18n-title="title_btn_close" title="Close">
         <svg viewBox="0 0 24 24"><path d="M18 6L6 18M6 6l12 12"/></svg>
       </button>
     </div>
 
     <div class="modal-body">
       <div class="set-group">
-        <div class="set-group-title">Local proxy</div>
+        <div class="set-group-title" data-i18n="group_interface">Interface</div>
         <div class="set-row">
-          <label for="set-bind">Bind address</label>
-          <input id="set-bind" type="text" class="set-input" spellcheck="false">
-        </div>
-        <div class="set-row">
-          <label for="set-socks">SOCKS5 port</label>
-          <input id="set-socks" type="number" class="set-input num" min="1" max="65535">
-        </div>
-        <div class="set-row">
-          <label for="set-http">HTTP port</label>
-          <input id="set-http" type="number" class="set-input num" min="1" max="65535">
-        </div>
-        <div class="set-row set-row-t">
-          <label>Auto system proxy
-            <span class="set-hint">applies on next connect</span></label>
-          <label class="switch sm"><input type="checkbox" id="set-autoproxy"><span class="track"></span></label>
+          <label for="set-lang"><span data-i18n="set_lang">Language</span>
+            <span class="set-hint" data-i18n="set_lang_hint">English / فارسی</span></label>
+          <select id="set-lang" class="set-input">
+            <option value="en">English</option>
+            <option value="fa">فارسی (فارسی)</option>
+          </select>
         </div>
       </div>
 
       <div class="set-group">
-        <div class="set-group-title">VPN tunnel</div>
+        <div class="set-group-title" data-i18n="group_local">Local proxy</div>
+        <div class="set-row">
+          <label for="set-bind"><span data-i18n="set_bind">Bind address</span></label>
+          <input id="set-bind" type="text" class="set-input" spellcheck="false">
+        </div>
+        <div class="set-row">
+          <label for="set-socks"><span data-i18n="set_socks">SOCKS5 port</span></label>
+          <input id="set-socks" type="number" class="set-input num" min="1" max="65535">
+        </div>
+        <div class="set-row">
+          <label for="set-http"><span data-i18n="set_http">HTTP port</span></label>
+          <input id="set-http" type="number" class="set-input num" min="1" max="65535">
+        </div>
         <div class="set-row set-row-t">
-          <label>Route DNS through the tunnel
-            <span class="set-hint">prevents DNS leaks</span></label>
+          <label><span data-i18n="set_autoproxy">Auto system proxy</span>
+            <span class="set-hint" data-i18n="set_autoproxy_hint">applies on next connect</span></label>
+          <label class="switch sm"><input type="checkbox" id="set-autoproxy"><span class="track"></span></label>
+        </div>
+        <div class="set-row">
+          <label for="set-bypass"><span data-i18n="set_bypass">Bypass list</span>
+            <span class="set-hint" data-i18n="set_bypass_hint">these addresses connect direct, without the proxy</span></label>
+          <input id="set-bypass" type="text" class="set-input" data-i18n-ph="set_bypass_ph" placeholder="e.g. *.ir, bank.example.com" spellcheck="false">
+        </div>
+      </div>
+
+      <div class="set-group">
+        <div class="set-group-title" data-i18n="group_tunnel">VPN tunnel</div>
+        <div class="set-row set-row-t">
+          <label><span data-i18n="set_tunneldns">Route DNS through the tunnel</span>
+            <span class="set-hint" data-i18n="set_tunneldns_hint">prevents DNS leaks</span></label>
           <label class="switch sm"><input type="checkbox" id="set-tunneldns"><span class="track"></span></label>
         </div>
         <div class="set-row set-row-t">
-          <label>Fall back to proxy mode
-            <span class="set-hint">if the tunnel cannot start</span></label>
+          <label><span data-i18n="set_tunfallback">Fall back to proxy mode</span>
+            <span class="set-hint" data-i18n="set_tunfallback_hint">if the tunnel cannot start</span></label>
           <label class="switch sm"><input type="checkbox" id="set-tunfallback"><span class="track"></span></label>
         </div>
+        <div class="set-row set-row-t">
+          <label><span data-i18n="set_killswitch">Kill switch</span>
+            <span class="set-hint" data-i18n="set_killswitch_hint">if the tunnel breaks, block everything instead of leaking</span></label>
+          <label class="switch sm"><input type="checkbox" id="set-killswitch"><span class="track"></span></label>
+        </div>
         <div class="set-row">
-          <label for="set-mtu">Tunnel MTU</label>
+          <label for="set-mtu"><span data-i18n="set_mtu">Tunnel MTU</span></label>
           <input id="set-mtu" type="number" class="set-input num" min="1200" max="9000" step="100">
         </div>
         <div class="set-row set-row-t">
-          <label>Clean up crashed sessions
-            <span class="set-hint">sweep leftover state on start</span></label>
+          <label><span data-i18n="set_sweep">Clean up crashed sessions</span>
+            <span class="set-hint" data-i18n="set_sweep_hint">sweep leftover state on start</span></label>
           <label class="switch sm"><input type="checkbox" id="set-sweep"><span class="track"></span></label>
         </div>
       </div>
 
       <div class="set-group">
-        <div class="set-group-title">Updates</div>
+        <div class="set-group-title" data-i18n="group_updates">Updates</div>
         <div class="set-row set-row-t">
-          <label>Automatic updates
-            <span class="set-hint">check GitHub on start + every 6 h, pre-download</span></label>
+          <label><span data-i18n="set_autoupdate">Automatic updates</span>
+            <span class="set-hint" data-i18n="set_autoupdate_hint">check GitHub on start + every 6 h, pre-download</span></label>
           <label class="switch sm"><input type="checkbox" id="set-autoupdate"><span class="track"></span></label>
         </div>
       </div>
@@ -248,8 +273,8 @@
     </div>
 
     <div class="modal-foot">
-      <button class="btn ghost" id="btn-settings-cancel">Cancel</button>
-      <button class="btn primary" id="btn-settings-save">Save changes</button>
+      <button class="btn ghost" id="btn-settings-cancel" data-i18n="btn_cancel">Cancel</button>
+      <button class="btn primary" id="btn-settings-save" data-i18n="btn_save">Save changes</button>
     </div>
   </div>
 </div>
@@ -258,8 +283,8 @@
 <div class="modal" id="modal-update" role="dialog" aria-modal="true" aria-label="Update VPeeN">
   <div class="modal-card">
     <div class="modal-head">
-      <h2>Update VPeeN</h2>
-      <button class="icon-btn" id="btn-update-close" title="Close">
+      <h2 data-i18n="upd_title">Update VPeeN</h2>
+      <button class="icon-btn" id="btn-update-close" data-i18n-title="title_btn_close" title="Close">
         <svg viewBox="0 0 24 24"><path d="M18 6L6 18M6 6l12 12"/></svg>
       </button>
     </div>
@@ -278,8 +303,29 @@
       <div class="upd-error" id="upd-error" hidden></div>
     </div>
     <div class="modal-foot">
-      <button class="btn ghost" id="btn-update-check">Check now</button>
-      <button class="btn primary" id="btn-update-install" disabled>Update &amp; Restart</button>
+      <button class="btn ghost" id="btn-update-check" data-i18n="upd_check">Check now</button>
+      <button class="btn primary" id="btn-update-install" disabled data-i18n="upd_install">Update &amp; Restart</button>
+    </div>
+  </div>
+</div>
+
+<!-- ======================= doctor modal (v4.9.0) ======================= -->
+<div class="modal" id="modal-doctor" role="dialog" aria-modal="true" aria-label="Protection check">
+  <div class="modal-card">
+    <div class="modal-head">
+      <h2 data-i18n="doctor_title">Protection Check</h2>
+      <button class="icon-btn" id="btn-doctor-close" data-i18n-title="title_btn_close" title="Close">
+        <svg viewBox="0 0 24 24"><path d="M18 6L6 18M6 6l12 12"/></svg>
+      </button>
+    </div>
+    <div class="modal-body">
+      <div class="upd-state" id="doctor-state">Idle</div>
+      <div class="doctor-list" id="doctor-list"></div>
+      <div class="set-note" id="doctor-note"></div>
+    </div>
+    <div class="modal-foot">
+      <button class="btn ghost" id="btn-doctor-close2" data-i18n="btn_close">Close</button>
+      <button class="btn primary" id="btn-doctor-run" data-i18n="doctor_run">Run check</button>
     </div>
   </div>
 </div>

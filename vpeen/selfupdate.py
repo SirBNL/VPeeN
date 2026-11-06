@@ -52,6 +52,11 @@ UPDATE_DIR = os.path.join(os.path.expanduser("~"), ".vpeen", "update")
 PENDING_MARKER = os.path.join(UPDATE_DIR, "pending.json")
 STAGING_MAX_AGE = 7 * 24 * 3600      # old staging files are swept after a week
 
+# v4.9.0: where the Inno Setup installer registers the app (per-user).
+# Inno appends "_is1" to the AppId to build the uninstall key name.
+UNINSTALL_KEY = (r"Software\Microsoft\Windows\CurrentVersion"
+                 r"\Uninstall\VPeeN_is1")
+
 _USER_AGENT = f"VPeeN-selfupdate/{getattr(sys.modules.get('vpeen'), '__version__', '0')}"
 
 # Tests replace this to fake the network; production leaves it None and
@@ -611,6 +616,59 @@ def stage_archive(archive_path: str, version: str) -> dict:
 
 
 # ------------------------------------------------------------------ install
+def _is_windows() -> bool:
+    """Injected/overridden by tests (sys.platform itself is not patchable
+    safely on a running interpreter)."""
+    return sys.platform.startswith("win")
+
+
+def _winreg_write_str(path: str, name: str, value: str) -> None:
+    """Windows-only: write one HKCU string value.  Overridden by tests."""
+    import winreg
+    with winreg.OpenKey(winreg.HKEY_CURRENT_USER, path, 0,
+                        winreg.KEY_SET_VALUE) as k:
+        winreg.SetValueEx(k, name, 0, winreg.REG_SZ, str(value))
+
+
+def _installed_via_setup() -> bool:
+    r"""True when THIS running exe lives inside an Inno Setup install.
+
+    The installer writes HKCU\...\Uninstall\VPeeN_is1\InstallLocation; a
+    portable (zip) deployment never creates that key, so the updater can
+    tell the two apart and only syncs the registry for installed builds.
+    Overridden by tests."""
+    if not _is_windows():
+        return False
+    try:
+        import winreg
+        with winreg.OpenKey(winreg.HKEY_CURRENT_USER, UNINSTALL_KEY, 0,
+                            winreg.KEY_READ) as k:
+            loc, _typ = winreg.QueryValueEx(k, "InstallLocation")
+        if not loc:
+            return False
+        exe = os.path.normcase(os.path.abspath(sys.executable))
+        base = os.path.normcase(os.path.abspath(loc))
+        return exe.startswith(base + os.sep) or os.path.dirname(exe) == base
+    except Exception:
+        return False
+
+
+def refresh_installed_version(version: str) -> bool:
+    """v4.9.0: after a self-update swap on an INSTALLED build, sync the
+    'Apps & Features' DisplayVersion (it otherwise stays at whatever the
+    setup exe last wrote).  Purely cosmetic - any failure is swallowed
+    because the swap itself already succeeded."""
+    if not _is_windows():
+        return False
+    try:
+        if not _installed_via_setup():
+            return False
+        _winreg_write_str(UNINSTALL_KEY, "DisplayVersion", str(version))
+        return True
+    except Exception:
+        return False
+
+
 def _running_target() -> "tuple[str, str] | None":
     """(kind, target path) of THIS running installation, or None when the
     app is not a frozen build (source installs never self-swap)."""
@@ -662,6 +720,9 @@ def install_staged(staged: dict, expect_version: str) -> None:
                 pass
             raise UpdateError("could not place the new executable "
                               "(original restored)")
+        # v4.9.0: installed (setup-exe) builds keep their uninstall entry
+        # in sync after the in-place swap; failures are cosmetic, not fatal.
+        refresh_installed_version(expect_version)
     else:      # app bundle directory
         old = f"{tpath}.old-{int(time.time())}"
         os.rename(tpath, old)

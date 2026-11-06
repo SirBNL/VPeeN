@@ -41,6 +41,13 @@ def check(name, cond, detail=""):
 
 
 import vpeen.selfupdate as su                     # noqa: E402
+
+# v4.9.0: the fake "remote" release must always be NEWER than the running
+# app (the suite used a hardcoded 4.9.0, which the version bump made stale).
+import vpeen as _vpeen
+_parts = getattr(_vpeen, "__version__", "0.0.0").split(".")
+FUTURE = f"{_parts[0]}.{int(_parts[1]) + 1}.0"
+
 import vpeen.webui as webui_mod                   # noqa: E402
 
 TMP = tempfile.mkdtemp(prefix="vpeen-selfupdate-test-")
@@ -67,7 +74,7 @@ class FakeTransport:
         return su._HttpResponse(status, body, headers)
 
 
-def release_payload(version="4.9.0", with_sums=True, notes="# Heading"):
+def release_payload(version=FUTURE, with_sums=True, notes="# Heading"):
     assets = [
         {"name": f"VPeeN-{version}-Windows.zip", "size": 100,
          "browser_download_url":
@@ -133,27 +140,27 @@ def test_notes():
 # ===================================================== 3. info building
 def test_build_info():
     print("== 3. release JSON -> update info ==")
-    rel = release_payload("4.9.0")
+    rel = release_payload(FUTURE)
     sums = {"VPeeN-4.9.0-Windows.zip": "ab" * 32,
             "VPeeN-4.9.0-macOS.zip": "cd" * 32,
             "VPeeN-4.9.0-Linux.tar.gz": "ef" * 32}
     # pick THIS platform's asset
-    mine = su.expected_asset_name("4.9.0")
+    mine = su.expected_asset_name(FUTURE)
     sums[mine] = "ab" * 32
-    info = su.build_update_info("4.8.0", rel, sums)
+    info = su.build_update_info(_vpeen.__version__, rel, sums)
     check("3a newer release -> available with the right asset",
           info["status"] == "available" and info["asset"] == mine
-          and info["version"] == "4.9.0" and info["sha256"] == "ab" * 32,
+          and info["version"] == FUTURE and info["sha256"] == "ab" * 32,
           str(info)[:120])
     check("3b notes converted", "Heading" in info["notes"])
-    info2 = su.build_update_info("4.9.0", rel, sums)
+    info2 = su.build_update_info(FUTURE, rel, sums)
     check("3c same version -> 'latest'", info2["status"] == "latest")
     old = release_payload("4.7.0")
     old_sums = {"VPeeN-4.7.0-" + su.platform_asset_label() + ".zip": "00" * 32}
     info3 = su.build_update_info("4.8.0", old, old_sums)
     check("3d older release -> not newer",
           info3["status"] == "latest", str(info3))
-    no_sums = release_payload("4.9.0", with_sums=False)
+    no_sums = release_payload(FUTURE, with_sums=False)
     try:
         su.build_update_info("4.8.0", no_sums, {})
         failed = False
@@ -171,7 +178,7 @@ def test_build_info():
 # ===================================================== 4. checks via transport
 def test_check_for_update():
     print("== 4. check_for_update through the transport layer ==")
-    rel = release_payload("4.9.0")
+    rel = release_payload(FUTURE)
     routes = {
         su.API_LATEST: (200, json.dumps(rel).encode(),
                         {"Content-Type": "application/json"}),
@@ -180,17 +187,17 @@ def test_check_for_update():
     ft = FakeTransport(routes)
     su._transport_hook = ft
     try:
-        info = su.check_for_update("4.8.0")
-        mine = su.expected_asset_name("4.9.0")
+        info = su.check_for_update(_vpeen.__version__)
+        mine = su.expected_asset_name(FUTURE)
         check("4a available, API + sums fetched",
               info["status"] == "available" and info["asset"] == mine,
               str(info)[:120])
         # release with no sums asset -> available + checksum_error
-        rel2 = release_payload("4.9.0", with_sums=False)
+        rel2 = release_payload(FUTURE, with_sums=False)
         ft2 = FakeTransport({su.API_LATEST: (200, json.dumps(rel2).encode(),
                                              {})})
         su._transport_hook = ft2
-        info2 = su.check_for_update("4.8.0")
+        info2 = su.check_for_update(_vpeen.__version__)
         check("4b checksumless release -> reported but not installable",
               info2["status"] == "available"
               and info2.get("checksum_error"), str(info2)[:160])
@@ -198,7 +205,7 @@ def test_check_for_update():
         su._transport_hook = None
         su._transport_hook = FakeTransport({})
         try:
-            su.check_for_update("4.8.0")
+            su.check_for_update(_vpeen.__version__)
             dead = False
         except su.UpdateError as e:
             dead = "update check failed" in str(e)
@@ -245,7 +252,7 @@ def test_stage_archive():
             zf.writestr("VPeeN.exe", b"MZFAKEEXE")
             zf.writestr("../evil.txt", b"boom")
             zf.writestr("inner/ok.txt", b"ok")
-        staged = su.stage_archive(zpath, "4.9.0")
+        staged = su.stage_archive(zpath, FUTURE)
         check("6a zip -> exe staged, traversal ignored",
               staged["kind"] == "exe"
               and open(staged["path"], "rb").read() == b"MZFAKEEXE"
@@ -261,7 +268,7 @@ def test_stage_archive():
             ti.type = tarfile.SYMTYPE
             ti.linkname = "/etc/passwd"
             tf.addfile(ti)
-        staged2 = su.stage_archive(tpath, "4.9.0")
+        staged2 = su.stage_archive(tpath, FUTURE)
         check("6b tar.gz -> executable staged, symlink skipped",
               staged2["kind"] == "exe"
               and open(staged2["path"], "rb").read() == b"PAYLOAD"
@@ -288,11 +295,11 @@ def test_install():
     try:
         sys.frozen = True
         sys.executable = exe
-        su.install_staged({"kind": "exe", "path": staged_new}, "4.9.0")
+        su.install_staged({"kind": "exe", "path": staged_new}, FUTURE)
         check("7a exe swapped atomically",
               open(exe, "rb").read() == b"NEW-BUILD"
               and open(exe + ".old", "rb").read() == b"OLD-BUILD")
-        check("7b pending marker written", su.check_pending("4.9.0") == "4.9.0"
+        check("7b pending marker written", su.check_pending(FUTURE) == FUTURE
               and not os.path.exists(su.PENDING_MARKER))
         # rollback: make the copy fail
         open(exe, "wb").write(b"OLD-BUILD")
@@ -327,13 +334,13 @@ def test_update_flow():
     print("== 8. UpdateFlow: check -> auto-download -> ready -> install ==")
     from vpeen.webui import UpdateFlow
     emitted, logs, restarts = [], [], []
-    rel = release_payload("4.9.0")
-    mine = su.expected_asset_name("4.9.0")
+    rel = release_payload(FUTURE)
+    mine = su.expected_asset_name(FUTURE)
     digest = "ab" * 32
     routes = {
         su.API_LATEST: (200, json.dumps(rel).encode(), {}),
         "https://dl.test/SHA256SUMS.txt": (200, sums_payload(rel), {}),
-        f"https://dl.test/v4.9.0/{mine}": (200, b"ZIPBYTES",
+        f"https://dl.test/v{FUTURE}/{mine}": (200, b"ZIPBYTES",
                                            {"Content-Length": "8"}),
     }
     payload_file = os.path.join(TMP, "flow.zip")
@@ -360,7 +367,7 @@ def test_update_flow():
         # zip -> staging fails gracefully (still 'available', error set)
         check("8a check found v4.9.0 and reported it",
               any(isinstance(e.get("update"), dict) and
-                  e["update"].get("latest") == "4.9.0" for e in emitted))
+                  e["update"].get("latest") == FUTURE for e in emitted))
         check("8b download verified against the real digest",
               os.path.exists(os.path.join(su.UPDATE_DIR, mine)) or
               st["status"] in ("available", "ready", "error"), st["status"])
@@ -368,7 +375,7 @@ def test_update_flow():
         zpath = os.path.join(TMP, "installable.zip")
         with zipfile.ZipFile(zpath, "w") as zf:
             zf.writestr("VPeeN.exe" if os.name == "nt" else "VPeeN", b"NEW")
-        routes[f"https://dl.test/v4.9.0/{mine}"] = (
+        routes[f"https://dl.test/v{FUTURE}/{mine}"] = (
             200, open(zpath, "rb").read(), {})
         routes["https://dl.test/SHA256SUMS.txt"] = (
             200, f"{hashlib.sha256(open(zpath,'rb').read()).hexdigest()}"

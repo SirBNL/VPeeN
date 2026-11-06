@@ -589,6 +589,114 @@ def mac_down(journal):
             _log(f"cleanup step failed: {e}", "warn")
 
 
+# ================================================== v4.9.0 kill-switch repair
+def _win_rebind(journal):
+    """Re-apply address + def1 hijack on the REBORN wintun adapter.
+
+    tun2socks owns the adapter; when it died the adapter vanished and
+    Windows dropped its routes - the physical default route would carry
+    traffic directly (leak) until the hijack is re-raised.  The reborn
+    adapter gets a NEW interface index, so the def1 routes must be
+    deleted (dead bindings) and re-added with the current index."""
+    tun = TUN_NAME["win32"]
+    addr_cmd = ["netsh", "interface", "ipv4", "set", "address",
+                f"name={tun}", "source=static", f"addr={TUN_IP}",
+                f"mask={TUN_MASK}", "gateway=none"]
+    rc, _, err = run(addr_cmd)
+    if rc != 0:
+        time.sleep(1.0)
+        rc, _, err = run(addr_cmd)
+        if rc != 0:
+            return False, f"reborn adapter address failed: {err}"
+    # adapter-scoped DNS again (best effort, like win_up)
+    run(["netsh", "interface", "ipv4", "set", "dnsservers",
+         f"name={tun}", "static", f"address={TUN_IP}",
+         "register=none", "validate=no"])
+    tun_idx = _win_tun_index()
+    if tun_idx is None:
+        return False, "reborn adapter did not appear"
+    hijack = [r for r in journal.get("routes", [])
+              if r.get("type") == "route" and r.get("gw") == TUN_IP]
+    for r in hijack:                    # stale index bindings are dead
+        run(["route", "delete", r["prefix"], "mask", r["mask"], r["gw"]])
+    ok = True
+    first_err = None
+    for r in hijack:
+        rc, _, err = run(["route", "add", r["prefix"], "mask", r["mask"],
+                          TUN_IP, "metric", "1", "if", str(tun_idx)])
+        if rc == 0:
+            r["if"] = tun_idx           # journal reflects the new binding
+        else:
+            ok = False
+            first_err = first_err or f"route add {r['prefix']} failed: {err}"
+    run(["ipconfig", "/flushdns"])
+    return ok, first_err
+
+
+def _linux_rebind(journal):
+    tun = TUN_NAME["linux"]
+    rc, _, err = run(["ip", "addr", "replace", f"{TUN_IP}/15", "dev", tun])
+    if rc != 0:
+        return False, f"ip addr replace failed: {err}"
+    run(["ip", "link", "set", tun, "up"])
+    ok = True
+    first_err = None
+    for prefix in ("0.0.0.0/1", "128.0.0.0/1"):
+        # replace = idempotent (kernel flushed the old tun-bound routes
+        # when the adapter died, but tolerate the odd survivor)
+        rc, _, err = run(["ip", "route", "replace", prefix, "dev", tun,
+                          "metric", "1"])
+        if rc != 0:
+            ok = False
+            first_err = first_err or f"route replace {prefix} failed: {err}"
+    return ok, first_err
+
+
+def _mac_rebind(journal):
+    tun = TUN_NAME["darwin"]
+    rc, _, err = run(["ifconfig", tun, TUN_IP, TUN_IP, "up"])
+    if rc != 0:
+        return False, f"ifconfig failed: {err}"
+    ok = True
+    first_err = None
+    chunks = ["1.0.0.0/8", "2.0.0.0/7", "4.0.0.0/6", "8.0.0.0/5",
+              "16.0.0.0/4", "32.0.0.0/3", "64.0.0.0/2", "128.0.0.0/1"]
+    for prefix in chunks:
+        rc, _, err = run(["route", "-n", "add", "-net", prefix,
+                          "-gateway", TUN_IP, "-interface", tun])
+        if rc != 0:
+            # route exists already -> update it to point at the tun
+            rc, _, err = run(["route", "-n", "change", "-net", prefix,
+                              "-gateway", TUN_IP, "-interface", tun])
+        if rc != 0:
+            ok = False
+            first_err = first_err or f"route add {prefix} failed: {err}"
+    return ok, first_err
+
+
+def rebind_tun_routes(journal):
+    """v4.9.0 kill switch: re-bind the TUN address + hijack routes after
+    tun2socks was respawned (new adapter, new interface index on Windows,
+    kernel-flushed routes on Linux/macOS).  Returns (ok, err) and keeps
+    the session journal in sync."""
+    try:
+        if sys_platform.startswith("win"):
+            ok, err = _win_rebind(journal)
+        elif sys_platform == "linux":
+            ok, err = _linux_rebind(journal)
+        elif sys_platform == "darwin":
+            ok, err = _mac_rebind(journal)
+        else:
+            ok, err = False, f"unsupported platform {sys_platform}"
+        try:
+            save_session({"os": sys_platform, "journal": journal})
+        except Exception as e:
+            _log(f"journal save after rebind failed: {e}", "warn")
+        return ok, err
+    except Exception as e:
+        return False, str(e)
+
+
 # ============================================================== dispatcher
 def bring_up(mtu, upstream_ips):
     """Journalized UP for the current OS. Returns (session, ok, err).
@@ -651,6 +759,14 @@ def apply_dns(journal) -> bool:
 
 
 def bring_down(journal):
+    # v4.9.0 kill switch: lift the containment rules FIRST, while the
+    # hijack routes may still be in place (that order can never leak;
+    # the reverse order could).
+    try:
+        from . import killswitch
+        killswitch.release_from_journal(journal)
+    except Exception as e:
+        _log(f"kill-switch release failed: {e}", "warn")
     if sys_platform.startswith("win"):
         win_down(journal)
     elif sys_platform == "linux":
@@ -665,6 +781,15 @@ def cleanup_from_session(session) -> None:
     os_name = session.get("os", sys_platform)
     journal = session.get("journal", {})
     try:
+        # v4.9.0: containment rules first (same no-leak ordering as
+        # bring_down), then a stale sweep for rules left behind by a
+        # crash inside the engage window (no session pointing at them).
+        try:
+            from . import killswitch
+            killswitch.release_from_journal(journal)
+            killswitch.sweep_stale()
+        except Exception as e:
+            _log(f"kill-switch sweep failed: {e}", "warn")
         if os_name.startswith("win"):
             win_down(journal)
         elif os_name == "linux":

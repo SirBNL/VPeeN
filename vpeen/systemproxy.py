@@ -6,11 +6,18 @@ System-wide proxy configuration with automatic backup / restore.
 * Linux   : GNOME (gsettings) - best effort, falls back to printed instructions.
 * macOS   : networksetup on the primary network service.
 
+v4.9.0 "split tunneling": `bypass` domains (e.g. *.ir, bank.example.com)
+are added to the platform's proxy-exception list, so those destinations
+connect DIRECTLY while everything else goes through VPeeN.  The previous
+exception list is captured in the same state backup as the rest, so
+`system off` restores it byte-for-byte.
+
 The previous values are stored in the state file before overriding, so
 `system off` (or a clean Ctrl+C) always restores the original configuration.
 """
 import os
 import platform
+import re
 import shutil
 
 from .utils import C, err, info, ok, warn
@@ -21,6 +28,42 @@ IS_MACOS = platform.system() == "Darwin"
 WIN_REG_KEY = r"Software\Microsoft\Windows\CurrentVersion\Internet Settings"
 BYPASS_LIST = "<local>;localhost;127.*;10.*;172.16.*;172.17.*;172.18.*;172.19.*;" \
               "172.2?.*;172.30.*;172.31.*;192.168.*"
+
+# v4.9.0: the local-only safety floor merged into any user bypass list -
+# loopback must NEVER be routed at the proxy, with or without user input.
+_BYPASS_FLOOR = ["localhost", "127.0.0.1", "::1"]
+_BYPASS_TOKEN_RE = re.compile(r"^[^\s;,\"'\\/]{1,253}$")
+_BYPASS_MAX = 200
+
+
+def parse_bypass(raw) -> list:
+    """User text -> a clean, de-duplicated bypass domain list.
+
+    Accepts comma/space/semicolon separated entries (`*.ir bank.example.com,`),
+    keeps wildcard prefixes, lower-cases, drops junk (empty or separator-
+    bearing tokens) and caps the list so a paste-bomb cannot slow the
+    proxy-exception path down."""
+    if not raw or not isinstance(raw, str):
+        return []
+    out, seen = [], set()
+    for tok in re.split(r"[,;\s]+", raw.strip()):
+        tok = tok.strip().strip(".").lower()
+        if not tok or not _BYPASS_TOKEN_RE.match(tok):
+            continue
+        if not re.search(r"[a-z0-9]", tok):
+            continue
+        if tok not in seen:
+            seen.add(tok)
+            out.append(tok)
+        if len(out) >= _BYPASS_MAX:
+            break
+    return out
+
+
+def _merged_bypass(bypass):
+    """User bypass + the loopback safety floor, floor first."""
+    return list(_BYPASS_FLOOR) + [d for d in (bypass or [])
+                                  if d not in _BYPASS_FLOOR]
 
 
 def _state_backup_key():
@@ -130,6 +173,7 @@ def _gnome_backup(state):
     backup = {}
     for schema_key in [
         ("org.gnome.system.proxy", "mode"),
+        ("org.gnome.system.proxy", "ignore-hosts"),   # v4.9.0 bypass
         ("org.gnome.system.proxy.http", "host"),
         ("org.gnome.system.proxy.http", "port"),
         ("org.gnome.system.proxy.https", "host"),
@@ -164,9 +208,56 @@ def _gnome_restore(state):
     return True
 
 
+def _mac_read_bypass(service: str) -> list:
+    """Current bypass-domain list of one service (v4.9.0); [] when none.
+
+    Kept EXACTLY as reported so system_off can restore it verbatim."""
+    import subprocess
+    try:
+        r = subprocess.run(
+            ["networksetup", "-getproxybypassdomains", service],
+            capture_output=True, text=True, timeout=15)
+        if r.returncode != 0:
+            return []
+        return [ln.strip() for ln in r.stdout.splitlines()
+                if ln.strip() and "There aren't" not in ln]
+    except Exception:
+        return []
+
+
+def _mac_restore_bypass(state) -> None:
+    """v4.9.0: put the pre-split bypass lists back, service by service."""
+    import subprocess
+    backup = state.get(_state_backup_key() + ":bypass")
+    if not isinstance(backup, dict):
+        return
+    for service, old in backup.items():
+        try:
+            if old:
+                subprocess.run(
+                    ["networksetup", "-setproxybypassdomains", service,
+                     *old], capture_output=True, timeout=15)
+            else:
+                subprocess.run(
+                    ["networksetup", "-setproxybypassdomains", service,
+                     "Empty"], capture_output=True, timeout=15)
+        except Exception:
+            continue
+    try:
+        state.set(_state_backup_key() + ":bypass", None)   # consumed
+    except Exception:
+        pass
+
+
 # ------------------------------------------------------------------- public
-def system_on(state, host="127.0.0.1", http_port=8080, socks_port=1080):
-    """Point the OS at our local HTTP proxy (and mention SOCKS5 where possible)."""
+def system_on(state, host="127.0.0.1", http_port=8080, socks_port=1080,
+              bypass=None):
+    """Point the OS at our local HTTP proxy (and mention SOCKS5 where possible).
+
+    v4.9.0: `bypass` is a list (or raw text, parsed) of domains that stay
+    DIRECT - split tunneling for proxy mode."""
+    bypass = parse_bypass(", ".join(bypass)) if isinstance(bypass, (list, tuple)) \
+        else parse_bypass(bypass)
     if IS_WINDOWS:
         import winreg
         prev = {
@@ -176,10 +267,18 @@ def system_on(state, host="127.0.0.1", http_port=8080, socks_port=1080):
         }
         state.set(_state_backup_key(), prev)
         _winreg_write("ProxyServer", f"{host}:{http_port}", winreg.REG_SZ)
-        _winreg_write("ProxyOverride", BYPASS_LIST, winreg.REG_SZ)
+        # v4.9.0: the user's bypass domains join the standard local-only
+        # exception list (ProxyOverride is restored from the backup on
+        # system_off, so no extra bookkeeping is needed here).
+        override = BYPASS_LIST
+        if bypass:
+            override += ";" + ";".join(bypass)
+        _winreg_write("ProxyOverride", override, winreg.REG_SZ)
         _winreg_write("ProxyEnable", 1, winreg.REG_DWORD)
         _wininet_refresh()
         ok(f"Windows system proxy -> {host}:{http_port} (HTTP & HTTPS via CONNECT)")
+        if bypass:
+            info(f"Bypass (direct): {', '.join(bypass)}")
         info(f"SOCKS5 available separately at {host}:{socks_port}")
         return True
 
@@ -206,13 +305,28 @@ def system_on(state, host="127.0.0.1", http_port=8080, socks_port=1080):
             detail = {s: {"web": _mac_read_proxy(s, "webproxy"),
                           "secure": _mac_read_proxy(s, "securewebproxy")}
                       for s in svc}
-            state.set(_state_backup_key(), {"services": svc, "detail": detail})
+            # v4.9.0: back up the bypass-domain lists too (only needed when
+            # we are about to REPLACE them with the user's split list).
+            bypass_backup = {}
+            if bypass:
+                for s in svc:
+                    bypass_backup[s] = _mac_read_bypass(s)
+                state.set(_state_backup_key() + ":bypass", bypass_backup)
+                merged = _merged_bypass(bypass)
+                for s in svc:
+                    subprocess.run(
+                        ["networksetup", "-setproxybypassdomains", s,
+                         *merged], capture_output=True, timeout=15)
+            state.set(_state_backup_key(), {"services": svc,
+                                            "detail": detail})
             for s in svc:
                 subprocess.run(["networksetup", "-setwebproxy", s, host, str(http_port)],
                                capture_output=True, timeout=15)
                 subprocess.run(["networksetup", "-setsecurewebproxy", s, host, str(http_port)],
                                capture_output=True, timeout=15)
             ok(f"macOS system proxy -> {host}:{http_port}")
+            if bypass:
+                info(f"Bypass (direct): {', '.join(bypass)}")
             info(f"SOCKS5 available separately at {host}:{socks_port}")
             return True
         except Exception as e:
@@ -222,6 +336,12 @@ def system_on(state, host="127.0.0.1", http_port=8080, socks_port=1080):
     # Linux
     if _gnome_available():
         _gnome_backup(state)
+        # v4.9.0: split tunneling - replace ignore-hosts (backed up above)
+        # with the floor + the user's list.
+        if bypass:
+            merged = _merged_bypass(bypass)
+            _gsettings(["set", "org.gnome.system.proxy", "ignore-hosts",
+                        "[" + ", ".join(f"'{d}'" for d in merged) + "]"])
         _gsettings(["set", "org.gnome.system.proxy", "mode", "manual"])
         _gsettings(["set", "org.gnome.system.proxy", "use-same-proxy", "true"])
         _gsettings(["set", "org.gnome.system.proxy.http", "host", host])
@@ -229,6 +349,8 @@ def system_on(state, host="127.0.0.1", http_port=8080, socks_port=1080):
         _gsettings(["set", "org.gnome.system.proxy.https", "host", host])
         _gsettings(["set", "org.gnome.system.proxy.https", "port", str(http_port)])
         ok(f"GNOME system proxy -> {host}:{http_port}")
+        if bypass:
+            info(f"Bypass (direct): {', '.join(bypass)}")
         info(f"SOCKS5 available separately at {host}:{socks_port}")
         return True
 
@@ -270,6 +392,7 @@ def system_off(state):
         return True
     if IS_MACOS:
         import subprocess
+        _mac_restore_bypass(state)          # v4.9.0: bypass lists first
         detail = backup.get("detail") if isinstance(backup.get("detail"), dict) else None
         if detail:
             # v1.3.0: restore each service EXACTLY as it was found - enabled

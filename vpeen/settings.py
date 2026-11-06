@@ -20,11 +20,20 @@ DEFAULTS = {
     "last_region": "",
     "auto_connect": False,
     "save_logs": True,
+    "ui_lang": "en",                # v4.9.0: "en" | "fa" (RTL UI)
+    # --- v4.9.0 split tunneling (proxy mode)
+    "bypass_domains": "",            # comma/space separated domains that
+                                    # stay DIRECT while the system proxy is
+                                    # on (e.g. "*.ir, bank.example.com")
     # --- tunnel (VPN) mode
     "tunnel_enabled": False,       # use TUN mode on connect
     "tunnel_dns": True,            # relay DNS through the tunnel (no leaks)
     "tunnel_mtu": 1500,            # conservative; raise to 8500 if stable
     "tunnel_sweep": True,          # clean orphaned state from a crashed session
+    # --- v4.9.0 kill switch (tunnel mode)
+    "kill_switch": True,           # if the tunnel breaks mid-session, block
+                                    # ALL traffic instead of leaking: firewall
+                                    # containment + automatic repair + lockdown
     # --- self-update (v4.8.0 "Sentinel")
     "auto_update": True,           # check GitHub for a newer release at
                                     # startup + every 6 h, pre-download it,

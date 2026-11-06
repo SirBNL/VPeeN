@@ -1141,3 +1141,100 @@ body[data-modal="update"] #modal-update .modal-card { transform: translateY(0) s
   white-space: pre-wrap;
   user-select: text;
 }
+
+
+/* ============================ v4.9.0: RTL (فارسی) ============================
+ * Flipped layout for [dir="rtl"] (set by app.js setLang("fa")).  The
+ * app is a centred single-column design, so RTL is mostly: sheet slide
+ * direction, side-borders/paddings, text alignment and the top-bar row.
+ * Selectors are prefixed with html[dir="rtl"] to keep LTR untouched.
+ */
+html[dir="rtl"] body { direction: rtl; }
+
+/* --- top bar: brand on the right, controls on the left */
+html[dir="rtl"] .topbar { flex-direction: row-reverse; }
+
+/* --- sheets slide in from the LEFT and carry their border on the right */
+html[dir="rtl"] .sheet {
+  right: auto; left: 0;
+  border-left: none;
+  border-right: 1px solid var(--border);
+  transform: translateX(-106%);
+}
+html[dir="rtl"] body[data-sheet="servers"] #sheet-servers,
+html[dir="rtl"] body[data-sheet="logs"] #sheet-logs { transform: translateX(0); }
+html[dir="rtl"] .sheet-head { padding: 20px 22px 14px 18px; }
+
+/* --- text alignment for lists, cards and logs */
+html[dir="rtl"] .loc-card { direction: rtl; }
+html[dir="rtl"] .lc-city, html[dir="rtl"] .lc-country { text-align: right; }
+html[dir="rtl"] .log-lines { direction: ltr; }   /* log lines stay LTR (timestamps, hostnames) */
+html[dir="rtl"] .set-row { direction: rtl; }
+html[dir="rtl"] .set-row label { text-align: right; }
+html[dir="rtl"] .modal-head,
+html[dir="rtl"] .modal-foot { direction: rtl; }
+html[dir="rtl"] .modal-foot { flex-direction: row-reverse; }
+html[dir="rtl"] .set-group-title { text-align: right; }
+html[dir="rtl"] .set-note { text-align: right; }
+
+/* --- footer: switches on the right, meta on the left */
+html[dir="rtl"] .bottombar { flex-direction: row-reverse; }
+html[dir="rtl"] .foot-meta { direction: ltr; }
+
+/* --- stat cards keep their figures LTR (digits), labels RTL */
+html[dir="rtl"] .stat-label { direction: rtl; }
+html[dir="rtl"] .stat-value,
+html[dir="rtl"] .stat-note { direction: ltr; unicode-bidi: embed; }
+
+/* --- search row icon placement */
+html[dir="rtl"] .search { direction: rtl; }
+html[dir="rtl"] .search input { direction: rtl; }
+
+/* --- toasts anchor to the left edge in RTL */
+html[dir="rtl"] .toasts { right: auto; left: 18px; text-align: right; }
+
+/* Persian typography: slightly larger line-height for legibility */
+html[dir="rtl"] body { line-height: 1.75; }
+html[dir="rtl"] .status-sub, html[dir="rtl"] .set-hint { line-height: 2.1; }
+
+
+/* ======================= v4.9.0: doctor (self-check) list ======================= */
+.doctor-list {
+  display: flex; flex-direction: column; gap: 8px;
+  margin-top: 10px; max-height: 46vh; overflow-y: auto;
+  padding-right: 2px;
+}
+.doctor-list::-webkit-scrollbar { width: 8px; }
+.doctor-list::-webkit-scrollbar-thumb {
+  background: var(--surface-3); border-radius: 99px;
+}
+.dr-row {
+  padding: 10px 12px;
+  border-radius: 12px;
+  border: 1px solid var(--border);
+  background: var(--surface);
+}
+.dr-row.ok    { border-color: rgba(45, 227, 167, .28); }
+.dr-row.warn  { border-color: rgba(252, 211, 77,  .38); }
+.dr-row.fail  { border-color: rgba(244, 114, 132, .45);
+                background: rgba(244, 114, 132, .07); }
+.dr-title {
+  display: flex; align-items: center; gap: 8px;
+  font-size: 13px; font-weight: 700; color: var(--text);
+}
+.dr-st {
+  flex: 0 0 auto;
+  font-size: 10px; font-weight: 800; letter-spacing: .06em;
+  text-transform: uppercase;
+  padding: 2px 8px; border-radius: 99px;
+}
+.dr-st.ok   { color: #8ef0c8; background: rgba(45, 227, 167, .12); }
+.dr-st.warn { color: #fde68a; background: rgba(252, 211, 77, .12); }
+.dr-st.fail { color: #fda4b1; background: rgba(244, 114, 132, .16); }
+.dr-detail {
+  margin-top: 5px;
+  font-size: 11.5px; line-height: 1.55;
+  color: var(--text-dim);
+  user-select: text;
+}
+html[dir="rtl"] .dr-title { direction: rtl; }

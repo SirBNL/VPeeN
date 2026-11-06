@@ -11,6 +11,356 @@
 
 const $ = (id) => document.getElementById(id);
 
+/* -------------------------------------------------------- i18n (v4.9.0)
+ * English + Persian (فارسی).  The dictionary is pure JSON (string
+ * values, {placeholder} templates) so tests can extract and verify it.
+ * fa flips the whole UI to RTL (see the [dir="rtl"] rules in style.css).
+ */
+const I18N = {
+  "en": {
+    "brand_tag": "FREE",
+    "status_not_protected": "Not Protected",
+    "status_protected": "Protected",
+    "status_protected_vpn": "Protected · VPN",
+    "status_connecting": "Connecting…",
+    "status_error": "Something went wrong",
+    "error_unknown": "Unknown error — check the logs",
+    "sub_exposed": "Your traffic is exposed — press connect to secure it",
+    "sub_exposed_ip": "Your traffic is exposed ({ip}) — press connect to secure it",
+    "sub_tunnel_active": "All device traffic is routed through {label}",
+    "sub_encrypted": "Encrypted tunnel active — {label}",
+    "ks_lockdown_title": "Kill Switch ON",
+    "ks_lockdown_sub": "All traffic is blocked — nothing leaked. Reconnect or disconnect.",
+    "ks_healing_title": "Repairing…",
+    "ks_healing_sub": "Kill switch engaged — traffic is blocked while the tunnel repairs itself",
+    "pill_protected": "Protected",
+    "pill_connecting": "Connecting",
+    "pill_error": "Error",
+    "pill_offline": "Offline",
+    "pill_blocked": "Blocked",
+    "pill_repairing": "Repairing",
+    "connecting_msg_1": "Requesting anonymous access token…",
+    "connecting_msg_2": "Fetching the free server list…",
+    "connecting_msg_3": "Negotiating a secure tunnel…",
+    "connecting_msg_4": "Verifying the exit IP…",
+    "optimal_location": "Optimal Location",
+    "optimal_sub": "Fastest free server",
+    "stat_down": "Downloaded",
+    "stat_up": "Uploaded",
+    "stat_session": "Session",
+    "stat_ip": "IP Address",
+    "note_not_connected": "not connected",
+    "note_real_ip": "your real IP",
+    "note_exit_ip": "exit IP · click to copy",
+    "note_conns": "{c} conns · {a} active",
+    "note_warm": " · {n} warm",
+    "note_rescued": " · {n} rescued",
+    "switch_system": "System Proxy",
+    "switch_tunnel": "VPN Tunnel",
+    "sheet_locations": "Locations",
+    "sheet_logs": "Connection Logs",
+    "search_ph": "Search locations",
+    "free_count": "{n} free",
+    "list_caption": "Free locations · {n}",
+    "no_match": "No matching locations",
+    "foot_premium": "Premium locations are hidden — unavailable on the free tier.",
+    "foot_locations_err": "Could not load locations — {err}",
+    "toast_disconnecting": "Disconnecting…",
+    "toast_conn_fail": "Could not start the connection",
+    "toast_switching": "Switching to {label}…",
+    "toast_selected": "Selected {label}",
+    "toast_update_available": "Update available: v{v} — one click to install",
+    "toast_restarting_upd": "Restarting VPeeN to the new version…",
+    "toast_installing_upd": "Downloading & installing the update…",
+    "toast_upd_fail": "Could not start the update",
+    "toast_shutdown_btn": "Shut down VPeeN",
+    "toast_shutting_down": "Shutting down…",
+    "toast_measuring": "Measuring latencies…",
+    "toast_log_copied": "Log copied",
+    "toast_clipboard": "Clipboard unavailable",
+    "toast_ip_copied": "{ip} copied",
+    "toast_tunnel_na": "Tunnel mode is not available on this system",
+    "toast_tunnel_changed": "Tunnel mode changed — reconnecting…",
+    "toast_tunnel_on": "VPN tunnel enabled for the next connect",
+    "toast_tunnel_off": "VPN tunnel disabled",
+    "settings_title": "Settings",
+    "group_interface": "Interface",
+    "group_local": "Local proxy",
+    "group_tunnel": "VPN tunnel",
+    "group_updates": "Updates",
+    "set_lang": "Language",
+    "set_lang_hint": "English / فارسی",
+    "set_bind": "Bind address",
+    "set_socks": "SOCKS5 port",
+    "set_http": "HTTP port",
+    "set_autoproxy": "Auto system proxy",
+    "set_autoproxy_hint": "applies on next connect",
+    "set_bypass": "Bypass list",
+    "set_bypass_hint": "these addresses connect direct, without the proxy",
+    "set_bypass_ph": "e.g. *.ir, bank.example.com",
+    "set_tunneldns": "Route DNS through the tunnel",
+    "set_tunneldns_hint": "prevents DNS leaks",
+    "set_tunfallback": "Fall back to proxy mode",
+    "set_tunfallback_hint": "if the tunnel cannot start",
+    "set_killswitch": "Kill switch",
+    "set_killswitch_hint": "if the tunnel breaks, block everything instead of leaking",
+    "set_mtu": "Tunnel MTU",
+    "set_sweep": "Clean up crashed sessions",
+    "set_sweep_hint": "sweep leftover state on start",
+    "set_autoupdate": "Automatic updates",
+    "set_autoupdate_hint": "check GitHub on start + every 6 h, pre-download",
+    "btn_cancel": "Cancel",
+    "btn_save": "Save changes",
+    "settings_saved": "Settings saved.",
+    "invalid_values": "invalid values",
+    "upd_title": "Update VPeeN",
+    "upd_check": "Check now",
+    "upd_install": "Update & Restart",
+    "upd_restart_to": "Restart to v{v}",
+    "upd_idle": "No update check has run yet.",
+    "upd_checking": "Checking GitHub for a newer release…",
+    "upd_latest": "You are on the newest release (v{v}).",
+    "upd_available": "v{v} is available ({size}). It downloads automatically; one click switches you over.",
+    "upd_available_src": "v{v} is available. This is a source installation — update with 'git pull'.",
+    "upd_downloading": "Downloading v{v}… {p}%",
+    "upd_staging": "Verifying & unpacking the new build…",
+    "upd_ready": "v{v} is downloaded and CHECKSUM-VERIFIED. One click switches you to it.",
+    "upd_installing": "Installing v{v}…",
+    "upd_restarting": "Installed v{v} — restarting VPeeN now.",
+    "upd_error": "Update error: {e}",
+    "upd_disabled": "Update checks are disabled in this build.",
+    "title_stat_down": "Total data downloaded through the tunnel",
+    "title_stat_up": "Total data uploaded through the tunnel",
+    "title_stat_session": "Current session duration",
+    "title_stat_ip": "Click to copy",
+    "title_switch_system": "Set the system-wide proxy automatically when connecting (browsers and apps that honour it)",
+    "title_switch_tunnel": "Route ALL device traffic through a VPN tunnel (needs admin)",
+    "title_btn_logs": "Connection logs",
+    "title_btn_doctor": "Protection self-check",
+    "title_btn_settings": "Settings",
+    "title_btn_refresh": "Refresh latencies",
+    "title_btn_close": "Close",
+    "title_btn_copy": "Copy log",
+    "title_btn_ver": "VPeeN update",
+    "title_optimal": "Let VPeeN pick the fastest free server",
+    "error_cannot_reach": "Cannot reach the VPeeN service.",
+    "btn_close": "Close",
+    "doctor_title": "Protection Check",
+    "doctor_run": "Run check",
+    "doctor_running": "Checking…",
+    "doctor_idle": "Run the check to see how protected you really are.",
+    "doctor_st_ok": "OK",
+    "doctor_st_warn": "Warning",
+    "doctor_st_fail": "Problem",
+    "doctor_done_ok": "All good.",
+    "doctor_done_warn": "Some points need your attention.",
+    "doctor_done_fail": "Problems found — see the red items.",
+    "dr_listeners": "Local proxy listeners",
+    "dr_ip_split": "Exit IP differs from your real IP",
+    "dr_routing": "Traffic routing",
+    "dr_dns": "DNS privacy",
+    "dr_killswitch": "Kill switch",
+    "dr_system": "System proxy applied",
+    "dr_quic": "QUIC / UDP side channel",
+    "dr_webrtc": "WebRTC advisory"
+  },
+  "fa": {
+    "brand_tag": "رایگان",
+    "status_not_protected": "بدون محافظت",
+    "status_protected": "محافظت‌شده",
+    "status_protected_vpn": "محافظت‌شده · VPN",
+    "status_connecting": "در حال اتصال…",
+    "status_error": "مشکلی پیش آمد",
+    "error_unknown": "خطای نامشخص — لاگ‌ها را ببینید",
+    "sub_exposed": "ترافیکتان در معرض است — برای امن‌سازی، وصل شوید",
+    "sub_exposed_ip": "ترافیکتان در معرض است ({ip}) — برای امن‌سازی، وصل شوید",
+    "sub_tunnel_active": "تمام ترافیک دستگاه از {label} عبور می‌کند",
+    "sub_encrypted": "تونل رمزنگاری‌شده فعال است — {label}",
+    "ks_lockdown_title": "کیل‌سوئیچ فعال",
+    "ks_lockdown_sub": "تمام ترافیک مسدود شده — هیچ چیزی لو نرفته. دوباره وصل شوید یا قطع کنید.",
+    "ks_healing_title": "در حال تعمیر…",
+    "ks_healing_sub": "کیل‌سوئیچ درگیر شده — ترافیک تا تعمیر تونل مسدود است",
+    "pill_protected": "محافظت‌شده",
+    "pill_connecting": "در حال اتصال",
+    "pill_error": "خطا",
+    "pill_offline": "آفلاین",
+    "pill_blocked": "مسدود",
+    "pill_repairing": "در حال تعمیر",
+    "connecting_msg_1": "درخواست توکن دسترسی ناشناس…",
+    "connecting_msg_2": "دریافت فهرست سرورهای رایگان…",
+    "connecting_msg_3": "برقراری تونل امن…",
+    "connecting_msg_4": "بررسی IP خروجی…",
+    "optimal_location": "بهترین لوکیشن",
+    "optimal_sub": "سریع‌ترین سرور رایگان",
+    "stat_down": "دانلود",
+    "stat_up": "آپلود",
+    "stat_session": "نشست",
+    "stat_ip": "آدرس IP",
+    "note_not_connected": "وصل نیستید",
+    "note_real_ip": "IP واقعی شما",
+    "note_exit_ip": "IP خروجی · برای کپی کلیک کنید",
+    "note_conns": "{c} اتصال · {a} فعال",
+    "note_warm": " · {n} آماده",
+    "note_rescued": " · {n} نجات‌یافته",
+    "switch_system": "پراکسی سیستم",
+    "switch_tunnel": "تونل VPN",
+    "sheet_locations": "لوکیشن‌ها",
+    "sheet_logs": "لاگ‌های اتصال",
+    "search_ph": "جست‌وجوی لوکیشن",
+    "free_count": "{n} رایگان",
+    "list_caption": "لوکیشن‌های رایگان · {n}",
+    "no_match": "لوکیشن منطبقی نیست",
+    "foot_premium": "لوکیشن‌های پرمیوم مخفی‌اند — در پلن رایگان در دسترس نیستند.",
+    "foot_locations_err": "لوکیشن‌ها بارگیری نشد — {err}",
+    "toast_disconnecting": "در حال قطع اتصال…",
+    "toast_conn_fail": "اتصال آغاز نشد",
+    "toast_switching": "در حال تغییر به {label}…",
+    "toast_selected": "{label} انتخاب شد",
+    "toast_update_available": "به‌روزرسانی موجود است: v{v} — با یک کلیک نصب کنید",
+    "toast_restarting_upd": "در حال ری‌استارت VPeeN روی نسخهٔ جدید…",
+    "toast_installing_upd": "در حال دانلود و نصب به‌روزرسانی…",
+    "toast_upd_fail": "به‌روزرسانی آغاز نشد",
+    "toast_shutdown_btn": "خاموش‌کردن VPeeN",
+    "toast_shutting_down": "در حال خاموش‌شدن…",
+    "toast_measuring": "در حال اندازه‌گیری پینگ‌ها…",
+    "toast_log_copied": "لاگ کپی شد",
+    "toast_clipboard": "کلیپ‌بورد در دسترس نیست",
+    "toast_ip_copied": "{ip} کپی شد",
+    "toast_tunnel_na": "حالت تونل روی این سیستم در دسترس نیست",
+    "toast_tunnel_changed": "حالت تونل تغییر کرد — در حال اتصال مجدد…",
+    "toast_tunnel_on": "تونل VPN برای اتصال بعدی فعال شد",
+    "toast_tunnel_off": "تونل VPN غیرفعال شد",
+    "settings_title": "تنظیمات",
+    "group_interface": "رابط کاربری",
+    "group_local": "پراکسی محلی",
+    "group_tunnel": "تونل VPN",
+    "group_updates": "به‌روزرسانی",
+    "set_lang": "زبان",
+    "set_lang_hint": "English / فارسی",
+    "set_bind": "آدرس Bind",
+    "set_socks": "پورت SOCKS5",
+    "set_http": "پورت HTTP",
+    "set_autoproxy": "پراکسی خودکار سیستم",
+    "set_autoproxy_hint": "در اتصال بعدی اعمال می‌شود",
+    "set_bypass": "لیست عبور مستقیم",
+    "set_bypass_hint": "این آدرس‌ها مستقیم وصل می‌شوند، بدون پراکسی",
+    "set_bypass_ph": "مثلاً *.ir, bank.example.com",
+    "set_tunneldns": "DNS از داخل تونل عبور کند",
+    "set_tunneldns_hint": "جلوی لو رفتن DNS را می‌گیرد",
+    "set_tunfallback": "در صورت شکست، به حالت پراکسی برگرد",
+    "set_tunfallback_hint": "اگر تونل بالا نیاید",
+    "set_killswitch": "کیل‌سوئیچ",
+    "set_killswitch_hint": "اگر تونل قطع شد، همه‌چیز مسدود شود نه لو رفتن",
+    "set_mtu": "MTU تونل",
+    "set_sweep": "پاک‌سازی نشست‌های کرش‌شده",
+    "set_sweep_hint": "در شروع، باقی‌مانده‌ها پاک شوند",
+    "set_autoupdate": "به‌روزرسانی خودکار",
+    "set_autoupdate_hint": "در شروع + هر ۶ ساعت چک گیت‌هاب، دانلود از پیش",
+    "btn_cancel": "انصراف",
+    "btn_save": "ذخیرهٔ تغییرات",
+    "settings_saved": "تنظیمات ذخیره شد.",
+    "invalid_values": "مقادیر نامعتبر",
+    "upd_title": "به‌روزرسانی VPeeN",
+    "upd_check": "همین حالا چک کن",
+    "upd_install": "به‌روزرسانی و ری‌استارت",
+    "upd_restart_to": "ری‌استارت به v{v}",
+    "upd_idle": "هنوز چک به‌روزرسانی انجام نشده است.",
+    "upd_checking": "در حال بررسی گیت‌هاب برای نسخهٔ جدیدتر…",
+    "upd_latest": "شما روی جدیدترین نسخه هستید (v{v}).",
+    "upd_available": "نسخهٔ v{v} موجود است ({size}). خودکار دانلود می‌شود؛ با یک کلیک جابه‌جا می‌شوید.",
+    "upd_available_src": "نسخهٔ v{v} موجود است. این یک نصب سورس است — با «git pull» به‌روزرسانی کنید.",
+    "upd_downloading": "در حال دانلود v{v}… {p}٪",
+    "upd_staging": "در حال راستی‌آزمایی و باز کردن نسخهٔ جدید…",
+    "upd_ready": "نسخهٔ v{v} دانلود و از نظر چک‌سام تأیید شده. با یک کلیک به آن جابه‌جا شوید.",
+    "upd_installing": "در حال نصب v{v}…",
+    "upd_restarting": "نسخهٔ v{v} نصب شد — در حال ری‌استارت VPeeN.",
+    "upd_error": "خطای به‌روزرسانی: {e}",
+    "upd_disabled": "چک به‌روزرسانی در این نسخه غیرفعال است.",
+    "title_stat_down": "مجموع دادهٔ دانلود‌شده از داخل تونل",
+    "title_stat_up": "مجموع دادهٔ آپلود‌شده از داخل تونل",
+    "title_stat_session": "مدت نشست جاری",
+    "title_stat_ip": "برای کپی کلیک کنید",
+    "title_switch_system": "هنگام اتصال، پراکسی سیستم به‌طور خودکار تنظیم شود (مرورگرها و برنامه‌هایی که آن را رعایت می‌کنند)",
+    "title_switch_tunnel": "تمام ترافیک دستگاه از تونل VPN عبور کند (نیاز به ادمین)",
+    "title_btn_logs": "لاگ‌های اتصال",
+    "title_btn_doctor": "خودآزمایی محافظت",
+    "title_btn_settings": "تنظیمات",
+    "title_btn_refresh": "تازه‌سازی پینگ‌ها",
+    "title_btn_close": "بستن",
+    "title_btn_copy": "کپی لاگ",
+    "title_btn_ver": "به‌روزرسانی VPeeN",
+    "title_optimal": "بگذار VPeeN سریع‌ترین سرور رایگان را انتخاب کند",
+    "error_cannot_reach": "ارتباط با سرویس VPeeN برقرار نشد.",
+    "btn_close": "بستن",
+    "doctor_title": "خودآزمایی محافظت",
+    "doctor_run": "انجام بررسی",
+    "doctor_running": "در حال بررسی…",
+    "doctor_idle": "بررسی را اجرا کنید تا ببینید واقعاً چقدر محافظت‌شده‌اید.",
+    "doctor_st_ok": "سالم",
+    "doctor_st_warn": "هشدار",
+    "doctor_st_fail": "مشکل",
+    "doctor_done_ok": "همه‌چیز خوب است.",
+    "doctor_done_warn": "چند مورد به توجه شما نیاز دارد.",
+    "doctor_done_fail": "مشکل پیدا شد — موارد قرمز را ببینید.",
+    "dr_listeners": "شنونده‌های پراکسی محلی",
+    "dr_ip_split": "IP خروجی با IP واقعی فرق دارد",
+    "dr_routing": "مسیریابی ترافیک",
+    "dr_dns": "حریم خصوصی DNS",
+    "dr_killswitch": "کیل‌سوئیچ",
+    "dr_system": "پراکسی سیستم اعمال شده",
+    "dr_quic": "کانال جانبی QUIC / UDP",
+    "dr_webrtc": "نکتهٔ WebRTC"
+  }
+};
+
+let LANG = "en";
+
+function t(key, vars) {
+  const dict = I18N[LANG] || I18N.en;
+  let s = Object.prototype.hasOwnProperty.call(dict, key)
+    ? dict[key] : I18N.en[key];
+  if (s == null) return key;
+  if (vars) {
+    for (const k of Object.keys(vars)) {
+      s = s.split("{" + k + "}").join(String(vars[k]));
+    }
+  }
+  return s;
+}
+
+function langDir(lang) { return lang === "fa" ? "rtl" : "ltr"; }
+
+function applyI18n() {
+  document.querySelectorAll("[data-i18n]").forEach((el) => {
+    el.textContent = t(el.dataset.i18n);
+  });
+  document.querySelectorAll("[data-i18n-ph]").forEach((el) => {
+    el.placeholder = t(el.dataset.i18nPh);
+  });
+  document.querySelectorAll("[data-i18n-title]").forEach((el) => {
+    el.title = t(el.dataset.i18nTitle);
+    if (el.hasAttribute("aria-label")) {
+      el.setAttribute("aria-label", t(el.dataset.i18nTitle));
+    }
+  });
+}
+
+function setLang(lang) {
+  LANG = I18N[lang] ? lang : "en";
+  document.documentElement.lang = LANG;
+  document.documentElement.dir = langDir(LANG);
+  document.body.classList.toggle("rtl", LANG === "fa");
+  applyI18n();
+  renderPhase();
+  renderSelection();
+  renderStats();
+  renderLocations();
+  renderUpdate();
+  renderDoctor();
+  updateFootMeta();
+  syncBottomSwitches();
+}
+
 /* ------------------------------------------------------------ state */
 const S = {
   phase: "disconnected",
@@ -28,6 +378,8 @@ const S = {
   native_window: true,
   version: "",
   listeners: {},
+  ks: null,                       /* v4.9.0: null | "healing" | "lockdown" */
+  doctor: null,                   /* v4.9.0: last self-check report */
   update: { status: "idle" },
   updateToasted: false,
   lastDown: 0,
@@ -37,11 +389,11 @@ const S = {
   connectMsgTimer: null,
 };
 
-const CONNECTING_MSGS = [
-  "Requesting anonymous access token…",
-  "Fetching the free server list…",
-  "Negotiating a secure tunnel…",
-  "Verifying the exit IP…",
+const CONNECTING_MSG_KEYS = [
+  "connecting_msg_1",
+  "connecting_msg_2",
+  "connecting_msg_3",
+  "connecting_msg_4",
 ];
 
 /* ------------------------------------------------------------ helpers */
@@ -85,7 +437,7 @@ function pingLevel(ms) {
 }
 
 function regionLabel(region) {
-  if (region === "optimal" || !region) return "Optimal Location";
+  if (region === "optimal" || !region) return t("optimal_location");
   const l = S.locations.find((x) => x.region === region);
   return l ? `${l.city}, ${l.country}` : region;
 }
@@ -117,32 +469,46 @@ function renderPhase() {
   const pill = $("net-label");
   const ring = $("ring-progress");
 
-  if (phase === "connected") {
+  // v4.9.0 kill switch: honest states for a broken/repaired tunnel
+  if (S.ks === "lockdown") {
+    title.textContent = t("ks_lockdown_title");
+    sub.textContent = t("ks_lockdown_sub");
+    pill.textContent = t("pill_blocked");
+    pill.style.color = "#fda4b1";
+  } else if (S.ks === "healing") {
+    title.textContent = t("ks_healing_title");
+    sub.textContent = t("ks_healing_sub");
+    pill.textContent = t("pill_repairing");
+    pill.style.color = "#fcd34d";
+    renderSelection();
+    renderStats();
+    return;
+  } else if (phase === "connected") {
     const tun = S.mode === "tunnel";
-    title.textContent = tun ? "Protected · VPN" : "Protected";
+    title.textContent = tun ? t("status_protected_vpn") : t("status_protected");
     const label = regionLabel(S.region);
     sub.textContent = tun
-      ? `All device traffic is routed through ${label}`
-      : `Encrypted tunnel active — ${label}`;
-    pill.textContent = "Protected";
+      ? t("sub_tunnel_active", { label })
+      : t("sub_encrypted", { label });
+    pill.textContent = t("pill_protected");
     pill.style.color = "#d7fbee";
   } else if (phase === "connecting") {
-    title.textContent = "Connecting…";
-    sub.textContent = CONNECTING_MSGS[0];
+    title.textContent = t("status_connecting");
+    sub.textContent = t(CONNECTING_MSG_KEYS[0]);
     startConnectingMsgs();
-    pill.textContent = "Connecting";
+    pill.textContent = t("pill_connecting");
     pill.style.color = "";
   } else if (phase === "error") {
-    title.textContent = "Something went wrong";
-    sub.textContent = S.lastError || "Unknown error — check the logs";
-    pill.textContent = "Error";
+    title.textContent = t("status_error");
+    sub.textContent = S.lastError || t("error_unknown");
+    pill.textContent = t("pill_error");
     pill.style.color = "#fda4b1";
   } else {
-    title.textContent = "Not Protected";
+    title.textContent = t("status_not_protected");
     sub.textContent = S.direct_ip
-      ? `Your traffic is exposed (${S.direct_ip}) — press connect to secure it`
-      : "Your traffic is exposed — press connect to secure it";
-    pill.textContent = "Offline";
+      ? t("sub_exposed_ip", { ip: S.direct_ip })
+      : t("sub_exposed");
+    pill.textContent = t("pill_offline");
     pill.style.color = "";
     stopConnectingMsgs();
   }
@@ -162,7 +528,7 @@ function startConnectingMsgs() {
   S.connectMsgTimer = setInterval(() => {
     if (S.phase !== "connecting") return stopConnectingMsgs();
     $("status-sub").textContent =
-      CONNECTING_MSGS[i % CONNECTING_MSGS.length];
+      t(CONNECTING_MSG_KEYS[i % CONNECTING_MSG_KEYS.length]);
     i++;
   }, 1900);
 }
@@ -174,8 +540,8 @@ function stopConnectingMsgs() {
 function renderSelection() {
   const city = $("loc-city"), country = $("loc-country");
   if (S.selected === "optimal" || !S.selected) {
-    city.textContent = "Optimal Location";
-    country.textContent = "Fastest free server";
+    city.textContent = t("optimal_location");
+    country.textContent = t("optimal_sub");
     setHeroFlag(null);
   } else {
     const l = S.locations.find((x) => x.region === S.selected);
@@ -231,19 +597,19 @@ function renderStats() {
     // that skip the full handshake and start moving data in one round-trip.
     // v4.7.0: "N rescued" counts hedged connects - handshakes a parallel
     // backup saved from a stalled server (tail-latency protection).
-    const warmTxt = st.warm ? ` · ${st.warm} warm` : "";
-    const hedgeTxt = st.hedges ? ` · ${st.hedges} rescued` : "";
+    const warmTxt = st.warm ? t("note_warm", { n: st.warm }) : "";
+    const hedgeTxt = st.hedges ? t("note_rescued", { n: st.hedges }) : "";
     $("stat-time-note").textContent =
-      `${st.conns || 0} conns · ${st.active || 0} active${warmTxt}${hedgeTxt}`;
+      t("note_conns", { c: st.conns || 0, a: st.active || 0 }) + warmTxt + hedgeTxt;
     $("stat-ip").textContent = S.exit_ip || "…";
-    $("stat-ip-note").textContent = "exit IP · click to copy";
+    $("stat-ip-note").textContent = t("note_exit_ip");
   } else {
     $("stat-down-note").textContent = "";
     $("stat-up-note").textContent = "";
     $("stat-time").textContent = "00:00";
-    $("stat-time-note").textContent = "not connected";
+    $("stat-time-note").textContent = t("note_not_connected");
     $("stat-ip").textContent = S.direct_ip || "…";
-    $("stat-ip-note").textContent = "your real IP";
+    $("stat-ip-note").textContent = t("note_real_ip");
     S.lastDownTs = 0;
   }
 }
@@ -281,7 +647,7 @@ function renderPingInto(box, ms) {
 function renderLocations() {
   const list = $("loc-list");
   const q = ($("search").value || "").trim().toLowerCase();
-  const key = JSON.stringify(S.locations) + "|" + q;
+  const key = JSON.stringify(S.locations) + "|" + q + "|" + LANG;
   if (key === S.renderedLocations) { renderPings(); return; }
   S.renderedLocations = key;
 
@@ -317,14 +683,19 @@ function renderLocations() {
     empty.className = "loc-card";
     empty.style.cursor = "default";
     empty.innerHTML = `<span class="lc-text">
-        <span class="lc-city" style="color:var(--text-faint)">No matching locations</span>
+        <span class="lc-city" style="color:var(--text-faint)">${t("no_match")}</span>
         <span class="lc-country"></span></span>`;
     list.appendChild(empty);
   }
 
-  $("free-count").textContent = `${S.locations.length} free`;
+  $("free-count").textContent = t("free_count", { n: S.locations.length });
   $("list-caption").textContent =
-    `Free locations · ${S.locations.length}`;
+    t("list_caption", { n: S.locations.length });
+  // v4.9.0: keep the sheet footer in the active language even when the
+  // locations EVENT predates the page load (boot snapshot path)
+  if (S.locations.length) {
+    $("sheet-foot").textContent = t("foot_premium");
+  }
   renderPings();
   renderSelection();
 }
@@ -333,10 +704,10 @@ function renderLocations() {
 async function togglePower() {
   if (S.phase === "connected" || S.phase === "connecting") {
     api("/api/disconnect", {});
-    toast("Disconnecting…", "info", 2200);
+    toast(t("toast_disconnecting"), "info", 2200);
   } else {
     const r = await api("/api/connect", { region: S.selected });
-    if (!r.ok) toast("Could not start the connection", "err");
+    if (!r.ok) toast(t("toast_conn_fail"), "err");
   }
 }
 
@@ -346,10 +717,10 @@ async function pickLocation(region) {
   renderSelection();
   await api("/api/select", { region });
   if (S.phase === "connected" || S.phase === "connecting") {
-    toast(`Switching to ${regionLabel(region)}…`, "info");
+    toast(t("toast_switching", { label: regionLabel(region) }), "info");
     await api("/api/connect", { region });
   } else {
-    toast(`Selected ${regionLabel(region)}`, "ok", 2200);
+    toast(t("toast_selected", { label: regionLabel(region) }), "ok", 2200);
     closeSheets();
   }
 }
@@ -411,6 +782,9 @@ function loadSettingsForm() {
   $("set-mtu").value = c.tunnel_mtu ?? 1500;
   $("set-sweep").checked = c.tunnel_sweep !== false;
   $("set-autoupdate").checked = c.auto_update !== false;
+  $("set-killswitch").checked = c.kill_switch !== false;   // v4.9.0
+  $("set-lang").value = (c.ui_lang === "fa") ? "fa" : "en";  // v4.9.0
+  $("set-bypass").value = c.bypass_domains || "";           // v4.9.0
   $("set-note").textContent = "";
 }
 
@@ -425,16 +799,20 @@ async function saveSettingsForm() {
     tunnel_mtu: parseInt($("set-mtu").value, 10),
     tunnel_sweep: $("set-sweep").checked,
     auto_update: $("set-autoupdate").checked,
+    kill_switch: $("set-killswitch").checked,               // v4.9.0
+    ui_lang: ($("set-lang").value === "fa") ? "fa" : "en", // v4.9.0
+    bypass_domains: $("set-bypass").value.trim(),            // v4.9.0
   };
   const r = await api("/api/settings", patch);
   const note = $("set-note");
   if (r.ok) {
     note.className = "set-note ok";
-    note.textContent = "Settings saved.";
+    note.textContent = t("settings_saved");
+    setLang(patch.ui_lang);        // apply the language right away
     setTimeout(closeModal, 650);
   } else {
     note.className = "set-note";
-    note.textContent = (r.errors || ["invalid values"]).join(" · ");
+    note.textContent = (r.errors || [t("invalid_values")]).join(" · ");
   }
 }
 
@@ -456,19 +834,20 @@ function updateFootMeta() {
 
 /* ------------------------------------------------------- update (v4.8.0) */
 const UPD_LABEL = {
-  idle: "No update check has run yet.",
-  checking: "Checking GitHub for a newer release…",
-  latest: (u) => `You are on the newest release (v${u.latest || u.current}).`,
+  idle: () => t("upd_idle"),
+  checking: () => t("upd_checking"),
+  latest: (u) => t("upd_latest", { v: u.latest || u.current }),
   available: (u) => u.source_install
-    ? `v${u.latest} is available. This is a source installation — update with ‘git pull’.`
-    : `v${u.latest} is available (${fmtBytes(u.size)}). It downloads automatically; one click switches you over.`,
-  downloading: (u) => `Downloading v${u.latest}… ${u.progress || 0}%`,
-  staging: "Verifying & unpacking the new build…",
-  ready: (u) => `v${u.latest} is downloaded and CHECKSUM-VERIFIED. One click switches you to it.`,
-  installing: (u) => `Installing v${u.latest}…`,
-  restarting: (u) => `Installed v${u.latest} — restarting VPeeN now.`,
-  error: (u) => `Update error: ${u.error || "unknown"}`,
-  disabled: "Update checks are disabled in this build.",
+    ? t("upd_available_src", { v: u.latest })
+    : t("upd_available", { v: u.latest, size: fmtBytes(u.size) }),
+  downloading: (u) => t("upd_downloading",
+                         { v: u.latest, p: u.progress || 0 }),
+  staging: () => t("upd_staging"),
+  ready: (u) => t("upd_ready", { v: u.latest }),
+  installing: (u) => t("upd_installing", { v: u.latest }),
+  restarting: (u) => t("upd_restarting", { v: u.latest }),
+  error: (u) => t("upd_error", { e: u.error || "?" }),
+  disabled: () => t("upd_disabled"),
 };
 
 function renderUpdate() {
@@ -506,7 +885,7 @@ function renderUpdate() {
     && !u.source_install;
   btn.disabled = !canInstall;
   btn.textContent = (st === "ready")
-    ? `Restart to v${u.latest}` : "Update & Restart";
+    ? t("upd_restart_to", { v: u.latest }) : t("upd_install");
   $("btn-update-check").disabled = (st === "checking" || st === "downloading"
     || st === "staging" || st === "installing" || st === "restarting");
 }
@@ -518,10 +897,10 @@ async function updateCheckNow() {
 
 async function updateInstallNow() {
   const u = S.update || {};
-  toast(u.status === "ready" ? "Restarting VPeeN to the new version…"
-    : "Downloading & installing the update…", "info", 4200);
+  toast(u.status === "ready" ? t("toast_restarting_upd")
+    : t("toast_installing_upd"), "info", 4200);
   try { await api("/api/update/install", {}); }
-  catch (e) { toast("Could not start the update", "err", 4200); }
+  catch (e) { toast(t("toast_upd_fail"), "err", 4200); }
 }
 
 /* ------------------------------------------------------------ events */
@@ -570,11 +949,11 @@ function applyEvent(ev) {
     case "locations":
       S.locations = ev.locations || [];
       if (!S.locations.length && ev.error) {
-        $("list-caption").textContent = "Free locations";
-        $("sheet-foot").textContent = `Could not load locations — ${ev.error}`;
+        $("list-caption").textContent = t("list_caption", { n: 0 });
+        $("sheet-foot").textContent = t("foot_locations_err",
+                                        { err: ev.error });
       } else {
-        $("sheet-foot").textContent =
-          "Premium locations are hidden — unavailable on the free tier.";
+        $("sheet-foot").textContent = t("foot_premium");
       }
       renderLocations();
       renderSelection();
@@ -582,6 +961,15 @@ function applyEvent(ev) {
     case "pings":
       S.pings = ev.pings || {};
       renderPings();
+      break;
+    case "ks":                         /* v4.9.0 kill switch */
+      S.ks = (ev.state === "healing") ? "healing"
+           : (ev.state === "lockdown") ? "lockdown" : null;
+      renderPhase();
+      break;
+    case "doctor":                     /* v4.9.0 self-check */
+      S.doctor = ev.report || null;
+      renderDoctor();
       break;
     case "selected":
       S.selected = ev.region;
@@ -591,6 +979,7 @@ function applyEvent(ev) {
       S.settings = ev.settings || {};
       syncBottomSwitches();
       updateFootMeta();       // v4.4.0: footer showed stale ports after a save
+      setLang((S.settings.ui_lang === "fa") ? "fa" : "en");
       break;
     case "system_proxy":
       break;
@@ -600,10 +989,70 @@ function applyEvent(ev) {
       if ((S.update.status === "available" || S.update.status === "ready")
           && !S.updateToasted) {
         S.updateToasted = true;
-        toast(`Update available: v${S.update.latest} — one click to install`, "ok", 5200);
+        toast(t("toast_update_available", { v: S.update.latest }),
+              "ok", 5200);
       }
       break;
   }
+}
+
+/* ------------------------------------------------ doctor (v4.9.0) */
+function renderDoctor() {
+  const list = $("doctor-list");
+  if (!list) return;
+  const state = $("doctor-state");
+  const note = $("doctor-note");
+  const report = S.doctor;
+  list.textContent = "";
+  if (!report || !report.length) {
+    if (state) state.textContent = t("doctor_idle");
+    if (note) note.textContent = "";
+    return;
+  }
+  let worst = "ok";
+  for (const c of report) {
+    if (c.status === "fail") worst = "fail";
+    else if (c.status === "warn" && worst !== "fail") worst = "warn";
+  }
+  if (state) {
+    state.textContent = t(worst === "fail" ? "doctor_done_fail"
+                            : worst === "warn" ? "doctor_done_warn"
+                            : "doctor_done_ok");
+    state.className = "upd-state" + (worst === "fail" ? " err" : "");
+  }
+  const order = { fail: 0, warn: 1, ok: 2 };
+  for (const c of [...report].sort((a, b) =>
+      (order[a.status] ?? 3) - (order[b.status] ?? 3))) {
+    const row = document.createElement("div");
+    row.className = "dr-row " + c.status;
+    const title = document.createElement("div");
+    title.className = "dr-title";
+    title.textContent = I18N[LANG] &&
+      I18N[LANG]["dr_" + c.id] ? t("dr_" + c.id) : c.title;
+    const st = document.createElement("span");
+    st.className = "dr-st " + c.status;
+    st.textContent = t("doctor_st_" + c.status);
+    title.prepend(st);
+    const detail = document.createElement("div");
+    detail.className = "dr-detail";
+    detail.setAttribute("dir", "auto");
+    detail.textContent = c.detail || "";
+    row.append(title, detail);
+    list.appendChild(row);
+  }
+  if (note) {
+    note.textContent = "";
+    note.className = "set-note";
+  }
+}
+
+async function runDoctor() {
+  renderDoctor();
+  const state = $("doctor-state");
+  if (state) state.textContent = t("doctor_running");
+  try {
+    await api("/api/doctor", {});
+  } catch (e) { /* the poller picks the report up */ }
 }
 
 /* ------------------------------------------------------------ polling */
@@ -632,7 +1081,7 @@ async function boot() {
     document.body.innerHTML =
       `<div style="display:flex;height:100vh;align-items:center;
         justify-content:center;color:#98a4c2;font:14px sans-serif">
-        Cannot reach the VPeeN service.</div>`;
+        ${t("error_cannot_reach")}</div>`;
     return;
   }
   Object.assign(S, {
@@ -650,6 +1099,7 @@ async function boot() {
     native_window: !!st.native_window,
     version: st.version,
     tunnel_available: !!st.tunnel_available,
+    ks: st.ks || null,
     update: st.update || { status: "idle" },
     seq: st.seq || 0,
   });
@@ -660,9 +1110,12 @@ async function boot() {
   $("log-lines").textContent = "";
   (st.logs || []).forEach(appendLog);
 
+  setLang((st.settings && st.settings.ui_lang === "fa") ? "fa" : "en");
   renderPhase();
   renderLocations();
   syncBottomSwitches();
+  S.doctor = st.doctor || null;
+  renderDoctor();
   poll();
 
   // quit affordance for browser-fallback mode
@@ -670,10 +1123,10 @@ async function boot() {
     const b = document.createElement("button");
     b.className = "btn ghost";
     b.style.marginRight = "auto";
-    b.textContent = "Shut down VPeeN";
+    b.textContent = t("toast_shutdown_btn");
     b.addEventListener("click", async () => {
       await api("/api/quit", {});
-      toast("Shutting down…", "info", 4000);
+      toast(t("toast_shutting_down"), "info", 4000);
     });
     $("btn-settings-cancel").parentNode.insertBefore(b, $("btn-settings-cancel"));
   }
@@ -702,7 +1155,7 @@ $("loc-select").addEventListener("keydown", (e) => {
 $("btn-servers-close").addEventListener("click", closeSheets);
 $("scrim").addEventListener("click", closeSheets);
 $("btn-refresh").addEventListener("click", async () => {
-  toast("Measuring latencies…", "info", 1800);
+  toast(t("toast_measuring"), "info", 1800);
   await api("/api/pings", {});
 });
 $("optimal-card").addEventListener("click", pickOptimal);
@@ -710,14 +1163,24 @@ $("search").addEventListener("input", renderLocations);
 
 $("btn-logs").addEventListener("click", () => toggleSheet("logs"));
 $("btn-logs-close").addEventListener("click", closeSheets);
+
+/* v4.9.0: protection self-check modal */
+$("btn-doctor").addEventListener("click", () => {
+  openModal("doctor");
+  renderDoctor();
+  if (!S.doctor) runDoctor();
+});
+$("btn-doctor-close").addEventListener("click", closeModal);
+$("btn-doctor-close2").addEventListener("click", closeModal);
+$("btn-doctor-run").addEventListener("click", runDoctor);
 $("btn-logs-copy").addEventListener("click", async () => {
   const txt = Array.from($("log-lines").children)
     .map((l) => `${l.querySelector(".log-ts").textContent} `
               + `${l.querySelector(".log-lv").textContent.padEnd(5)} `
               + `${l.querySelector(".log-tx").textContent}`)
     .join("\n");
-  try { await navigator.clipboard.writeText(txt); toast("Log copied", "ok", 2000); }
-  catch { toast("Clipboard unavailable", "err"); }
+  try { await navigator.clipboard.writeText(txt); toast(t("toast_log_copied"), "ok", 2000); }
+  catch { toast(t("toast_clipboard"), "err"); }
 });
 
 $("btn-settings").addEventListener("click", () => openModal("settings"));
@@ -734,8 +1197,8 @@ $("btn-update-install").addEventListener("click", updateInstallNow);
 $("stat-ip-card").addEventListener("click", async () => {
   const ip = $("stat-ip").textContent;
   if (!ip || ip === "…" || ip === "—") return;
-  try { await navigator.clipboard.writeText(ip); toast(`${ip} copied`, "ok", 1800); }
-  catch { toast("Clipboard unavailable", "err"); }
+  try { await navigator.clipboard.writeText(ip); toast(t("toast_ip_copied", { ip }), "ok", 1800); }
+  catch { toast(t("toast_clipboard"), "err"); }
 });
 
 $("in-system").addEventListener("change", async (e) => {
@@ -746,18 +1209,17 @@ $("in-tunnel").addEventListener("change", async (e) => {
   const on = e.target.checked;
   if (on && !S.tunnel_available) {
     e.target.checked = false;
-    toast("Tunnel mode is not available on this system", "err", 4200);
+    toast(t("toast_tunnel_na"), "err", 4200);
     return;
   }
   S.settings.tunnel_enabled = on;
   await api("/api/settings", { tunnel_enabled: on });
   if (S.phase === "connected" || S.phase === "connecting") {
     // parity with the v4.3 Tk GUI: applying a mode change live reconnects
-    toast("Tunnel mode changed — reconnecting…", "info", 2600);
+    toast(t("toast_tunnel_changed"), "info", 2600);
     await api("/api/connect", { region: S.selected });
   } else {
-    toast(on ? "VPN tunnel enabled for the next connect"
-             : "VPN tunnel disabled", "info", 2600);
+    toast(on ? t("toast_tunnel_on") : t("toast_tunnel_off"), "info", 2600);
   }
 });
 

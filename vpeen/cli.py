@@ -294,7 +294,9 @@ async def cmd_run(args):
              "configured user/password.")
 
     if args.set_system:
-        system_on(api.state, bind, http_port, socks_port)
+        from .systemproxy import parse_bypass
+        system_on(api.state, bind, http_port, socks_port,
+                  bypass=parse_bypass(getattr(args, "bypass", "") or ""))
 
     stop = asyncio.Event()
     loop = asyncio.get_running_loop()
@@ -476,6 +478,10 @@ def build_parser():
                          "(mandatory when binding to a non-loopback address)")
     rp.add_argument("--proxy-pass", default=None,
                     help="password for --proxy-user")
+    rp.add_argument("--bypass", default="",
+                    help="comma/space separated domains that stay DIRECT "
+                         "while --set-system is on (e.g. '*.ir') "
+                         "[v4.9.0 split tunneling]")
     rp.add_argument("--set-system", action="store_true",
                     help="auto-set system proxy (restored on exit)")
 

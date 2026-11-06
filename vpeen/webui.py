@@ -345,6 +345,9 @@ class Bridge:
         self.connected_since = None
         self.listeners = {}
         self.system_proxy = False
+        self.ks_state = None                # v4.9.0: None|"healing"|"lockdown"
+        self.doctor_report = None          # v4.9.0: last self-check result
+        self._doctor_busy = False          # v4.9.0: one check at a time
         self.locations = []                    # free locations, normalized
         self.locations_error = None
         self.pings = {}
@@ -392,6 +395,11 @@ class Bridge:
                          "detected - cleaning it up (admin rights may be "
                          "requested)...", "warn")
                 self.tunnel.cleanup_orphans(log=self.log)
+                # v4.9.0: honesty first - a cleaned crash means the user
+                # was unprotected (or firewalled) while the app was down.
+                self.log("Crashed session cleaned up. While VPeeN was not "
+                         "running your traffic was NOT protected - "
+                         "reconnect when you are ready.", "warn")
             except Exception as e:
                 self.log(f"tunnel sweep failed: {e}", "warn")
 
@@ -573,6 +581,7 @@ class Bridge:
                 self.phase = "disconnected"
                 self.connected_since = None
                 self.conn_mode = "proxy"
+                self.ks_state = None
                 self.stats = {"up": 0, "down": 0, "conns": 0, "active": 0,
                               "failed": 0}
             self.emit({"t": "phase", "phase": "disconnected"})
@@ -623,7 +632,8 @@ class Bridge:
                 upstream_hosts=upstream_hosts,
                 mtu=int(self.cfg.get("tunnel_mtu", 1500)),
                 dns=bool(self.cfg.get("tunnel_dns", True)),
-                strict_ips=strict_ips)
+                strict_ips=strict_ips,
+                kill_switch=bool(self.cfg.get("kill_switch", True)))
         except Exception as e:
             self._tun_failed_fallback(f"tunnel start failed: {e}")
             return
@@ -671,14 +681,39 @@ class Bridge:
                 self.conn_mode = "tunnel"
                 self.phase = "connected"
                 self.connected_since = time.time()
+                self.ks_state = None           # fresh tunnel, no kill switch
             self.log("VPN tunnel is up - all traffic is protected.", "ok")
             self.emit({"t": "phase", "phase": "connected",
                        "region": self.region, "mode": "tunnel"})
+        elif ph in ("ks_engaged", "ks_healed", "ks_lockdown"):
+            # v4.9.0 kill switch: the worker's repair / lockdown states.
+            # The phase stays "connected" - the tunnel routes are still
+            # ours - but the UI must show what is actually happening.
+            if ph == "ks_engaged":
+                with self.lock:
+                    self.ks_state = "healing"
+                self.log("Kill switch engaged - traffic is BLOCKED while "
+                         "the tunnel is being repaired...", "warn")
+                self.emit({"t": "ks", "state": "healing"})
+            elif ph == "ks_healed":
+                with self.lock:
+                    self.ks_state = None
+                self.log("Kill switch: tunnel repaired automatically - no "
+                         "leak occurred.", "ok")
+                self.emit({"t": "ks", "state": "off"})
+            else:
+                with self.lock:
+                    self.ks_state = "lockdown"
+                self.log("KILL SWITCH LOCKDOWN - all traffic stays blocked. "
+                         "Disconnect to restore your network, or connect "
+                         "again to retry.", "err")
+                self.emit({"t": "ks", "state": "lockdown"})
         elif ph in ("down", "error"):
             detail = ev.get("detail") or ""
             was_mode = self.conn_mode
             with self.lock:
                 self.conn_mode = "proxy"
+                self.ks_state = None      # containment lifted by the worker
             if self._stop_after_tunnel:
                 # a disconnect is in flight: stop the proxy core NOW.
                 # v4.4.0: this used to just `return` and wait for the 8 s
@@ -741,6 +776,34 @@ class Bridge:
         self.emit({"t": "locations", "locations": rows})
         self.refresh_pings()
 
+    # ------------------------------------------------------------ v4.9.0 doctor
+    def run_doctor(self):
+        """Protection self-check: pure doctor.run_checks() over a live
+        snapshot, on a worker thread; the report lands in the snapshot
+        and as a UI event.  Never touches third-party services."""
+        if self._doctor_busy:
+            return
+        self._doctor_busy = True
+
+        def _run():
+            try:
+                from .doctor import run_checks, worst_status, summarize
+                snap = self.snapshot(False)
+                report = run_checks(snap)
+                with self.lock:
+                    self.doctor_report = report
+                self.emit({"t": "doctor", "report": report})
+                level = {"ok": "ok", "warn": "warn",
+                         "fail": "err"}[worst_status(report)]
+                self.log(f"Self-check: {summarize(report)}", level)
+            except Exception as e:
+                self.log(f"self-check failed: {e}", "warn")
+            finally:
+                self._doctor_busy = False
+
+        threading.Thread(target=_run, daemon=True,
+                         name="vpeen-doctor").start()
+
     def refresh_pings(self):
         regions = [r["region"] for r in self.locations]
         if not regions:
@@ -793,6 +856,12 @@ class Bridge:
         self._stop_after_tunnel = False
         self._pending_tunnel = want_tunnel
         set_system = bool(cfg.get("auto_system_proxy", False)) and not want_tunnel
+        # v4.9.0: split tunneling - domains that stay DIRECT while the
+        # system proxy is on (tunnel mode routes EVERYTHING by design).
+        from .systemproxy import parse_bypass
+        bypass = parse_bypass(cfg.get("bypass_domains", "")) if set_system else []
+        if bypass:
+            self.log(f"Bypass (direct, no proxy): {', '.join(bypass)}")
         bind = (cfg.get("bind") or "127.0.0.1").strip() or "127.0.0.1"
         problem = validate_bind_security(bind, None, None)
         if problem:
@@ -802,7 +871,8 @@ class Bridge:
             self.phase = "connecting"
         self.emit({"t": "phase", "phase": "connecting",
                    "region": self.selected})
-        self.core.start(target, bind, socks_port, http_port, set_system)
+        self.core.start(target, bind, socks_port, http_port, set_system,
+                        bypass=bypass)
 
     def request_disconnect(self):
         if self.demo:
@@ -896,9 +966,22 @@ class Bridge:
                     cfg["tunnel_mtu"] = v
                 except (TypeError, ValueError):
                     errors.append("tunnel_mtu: must be a number 576-65535")
+            if "ui_lang" in patch:
+                # v4.9.0: the UI language - only the two shipped
+                # dictionaries are valid; anything else falls back to en.
+                v = str(patch["ui_lang"]).strip().lower()
+                cfg["ui_lang"] = v if v in ("en", "fa") else "en"
+            if "bypass_domains" in patch:
+                # v4.9.0: split-tunnel list - normalized through the same
+                # parser the proxy path uses, so what is saved is exactly
+                # what will be exempted (and junk never reaches the
+                # registry / networksetup / gsettings).
+                from .systemproxy import parse_bypass
+                cfg["bypass_domains"] = ", ".join(
+                    parse_bypass(str(patch["bypass_domains"] or "")))[:2000]
             for key in ("auto_system_proxy", "tunnel_enabled", "tunnel_dns",
                         "tunnel_sweep", "tun_fallback", "save_logs",
-                        "auto_connect", "auto_update"):
+                        "auto_connect", "auto_update", "kill_switch"):
                 if key in patch:
                     cfg[key] = bool(patch[key])
                 if key == "auto_update" and self.update is not None:
@@ -938,6 +1021,8 @@ class Bridge:
                 "connected_since": self.connected_since,
                 "listeners": dict(self.listeners),
                 "system_proxy": self.system_proxy,
+                "ks": self.ks_state,
+                "doctor": self.doctor_report,
                 "tunnel_available": self._tunnel_available(),
                 "update": (self.update.state() if self.update is not None
                            else {"status": "disabled"}),
@@ -1049,6 +1134,7 @@ class Bridge:
             self.phase = "disconnected"
             self.connected_since = None
             self.exit_ip = None
+            self.ks_state = None
             self.stats = {"up": 0, "down": 0, "conns": 0, "active": 0,
                           "failed": 0}
         self.log("Disconnected.", "info")
@@ -1226,6 +1312,11 @@ class WebUI:
                     self._json({"ok": True})
                     bridge.log("Shut down requested from the UI.", "info")
                     threading.Thread(target=bridge.stop, daemon=True).start()
+                    return
+                if path == "/api/doctor":
+                    # v4.9.0: protection self-check (works in demo mode too)
+                    if self._bridge_call(bridge.run_doctor):
+                        return self._json({"ok": True})
                     return
                 if path == "/api/update/check":
                     if bridge.update is None:

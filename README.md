@@ -40,6 +40,8 @@ global proxy network. **VPeeN** speaks the same protocol natively and brings tho
   connection from ~3 round-trips to 1, blackholed server addresses are raced
   Happy-Eyeballs style instead of timing out, servers are auto-ranked fastest-first,
   and repeated DNS lookups are answered from a local cache
+- 🧱 **Leak-proof by design (v4.9)** — a real kill switch, a one-click self-check and a Persian (RTL) UI on top of the v4.8 auto-updater
+- 🪟 **A real Windows installer (v4.9)** — `VPeeN-Setup-x.y.z.exe`: Start Menu, uninstaller, zero UAC
 - 🆓 **Free-tier honest** — the list shows the 7 locations the free network actually
   serves, with real measured latency; the 178 premium ones are hidden instead of failing
 
@@ -65,6 +67,10 @@ flowchart LR
 | 🔒 | **Real VPN Tunnel (TUN)** | Hiddify-style full-system tunnel — every app, zero config (see below) |
 | 🖥️ | **System proxy mode** | Classic SOCKS5/HTTP mode with a one-switch OS setup + clean restore on exit |
 | 🛡️ | **DNS leak protection** | In tunnel mode DNS is relayed through the tunnel itself |
+| 🧱 | **Kill switch (v4.9)** | If the tunnel breaks mid-session, traffic is **firewalled and blocked** — never leaked — while VPeeN repairs it automatically (netsh on Windows, iptables on Linux); a red lockdown state when repair fails |
+| 🩺 | **Protection self-check (v4.9)** | One click runs 8 honest checks — exit-IP leak, DNS privacy, routing, kill switch, QUIC/WebRTC side channels — on your live connection, no third-party sites |
+| 🇮🇷 | **فارسی + RTL (v4.9)** | The whole UI speaks Persian with a proper right-to-left layout — Settings → Language |
+| 🔀 | **Split tunneling (v4.9)** | A bypass list (`*.ir`, your bank…) keeps chosen domains DIRECT in proxy mode — Windows/macOS/GNOME, restored on disconnect |
 | 📜 | **Activity log** | Color-coded, autoscrolling, one-click copy — every step of every connection |
 | ⚙️ | **Settings** | Ports, bind, tunnel MTU, DNS relay, fallback policy, crash cleanup — all validated on save |
 | 🔁 | **Self-healing tunnels** | Round-robin across servers, automatic retry and credential rotation on failure |
@@ -91,10 +97,17 @@ Download from [**Releases**](../../releases):
 
 | File | OS | Run |
 |---|---|---|
-| `VPeeN-Windows.zip` | Windows 10/11 | unzip → `VPeeN.exe` |
+| `VPeeN-Setup-x.y.z.exe` | Windows 10/11 | **double-click → installs & launches** (no admin needed) |
+| `VPeeN-Windows.zip` | Windows 10/11 | portable alternative — unzip → `VPeeN.exe` |
 | `VPeeN-macOS.zip` | macOS 10.13+ | unzip → `VPeeN.app` — see the [macOS first-launch note](#-macos-first-launch-gatekeeper) |
 | `VPeeN-Linux.tar.gz` | Linux x64 | extract → `./VPeeN` |
 | `VPeeN-Chrome-Extension.zip` | Chrome 108+ | unzip → [load unpacked](#-chrome-extension--vpeen-bridge) |
+
+> 🪟 **Windows:** grab the **Setup exe** — a real installer (Start Menu shortcuts, an
+> optional desktop icon and an *Apps & Features* entry with an uninstaller) that installs
+> per-user into `%LOCALAPPDATA%\Programs\VPeeN`, so **no UAC / admin rights** are needed.
+> The zip stays for portable use (USB stick, restricted machines); both get the same
+> automatic in-app updates.
 
 > Windows/macOS open the UI in a native desktop window (pywebview); Linux (and any machine
 > without a webview backend) opens it in your default browser — same UI, same features.
@@ -227,6 +240,44 @@ launches as a properly elevated helper and points at its own local SOCKS5.
 | Admin rights | not needed | once per connect (UAC) |
 | DNS | resolved by your system | relayed through the tunnel |
 | Best for | browsers, quick use | full protection, stubborn apps, TCP-heavy apps |
+
+### 🧱 Kill switch — blocked, never leaked (v4.9)
+
+When tun2socks dies mid-session, the TUN adapter — and with it the hijack routes —
+dies too. Without a kill switch every packet then silently leaves through your
+real gateway while the UI still says *Protected*. v4.9 closes that hole:
+
+1. **Detect** — the elevated worker polls tun2socks every second.
+2. **Contain** — tagged firewall rules (`VPeeN-KS`) drop all non-loopback
+   outbound traffic: `netsh` on Windows, `iptables`/`ip6tables` on Linux.
+   (macOS: detection + repair, no firewall primitive — documented limitation.)
+3. **Repair** — tun2socks is respawned, the hijack routes re-bound to the new
+   adapter, the DNS relay restarted — and only once the tunnel is *proven* back
+   does the containment lift. The repair path has no leak window.
+4. **Lockdown** — if repair fails 3×, the containment stays: a red
+   *Kill Switch ON* state; one click disconnects (full restore) or retries.
+
+The rules are journaled with the session (crash recovery removes them), engage
+is delete-then-add, release is idempotent, and the startup sweep removes stale
+rules even without a session file — **no rule survives “start the app once.”**
+With the kill switch on, a dead GUI leaves the blackhole in place (offline, not
+leaking) instead of silently restoring direct traffic.
+Toggle: Settings → VPN tunnel → **Kill switch** (default on, tunnel mode only).
+
+### 🩺 Doctor — the one-click protection self-check (v4.9)
+
+The shield button in the top bar runs 8 checks against your live connection —
+exit-IP leak detection, routing coverage, DNS privacy, kill-switch state,
+system proxy, QUIC/WebRTC side channels — without contacting any third-party
+“what is my IP” site. Results are sorted problems-first and localized.
+
+### 🔀 Split tunneling (v4.9, proxy mode)
+
+Settings → Local proxy → **Bypass list**: domains like `*.ir` or your bank's
+site connect DIRECT while the system proxy is on. The previous exception list
+is backed up and restored byte-for-byte on disconnect. CLI equivalent:
+`python -m vpeen.cli run --region nl --set-system --bypass "*.ir"`.
+Tunnel mode ignores the list on purpose — a full tunnel is a full tunnel.
 
 ## 🏗️ Build from source
 
@@ -502,10 +553,16 @@ Respect the laws of your country and the networks you connect to.
 
 | فایل | سیستم‌عامل | اجرا |
 |---|---|---|
-| `VPeeN-Windows.zip` | ویندوز ۱۰/۱۱ | باز کن → `VPeeN.exe` |
+| `VPeeN-Setup-x.y.z.exe` | ویندوز ۱۰/۱۱ | **دابل‌کلیک → نصب و اجرا** (بدون نیاز به ادمین) |
+| `VPeeN-Windows.zip` | ویندوز ۱۰/۱۱ | نسخهٔ پرتابل — باز کن → `VPeeN.exe` |
 | `VPeeN-macOS.zip` | مک ۱۰.۱۳+ | باز کن → `VPeeN.app` *(برای بار اول، پایین رو بخون)* |
 | `VPeeN-Linux.tar.gz` | لینوکس ۶۴بیتی | باز کن → `./VPeeN` |
 | `VPeeN-Chrome-Extension.zip` | کروم ۱۰۸+ | باز کن → Load unpacked |
+
+> 🪟 **ویندوز:** فایل **Setup** رو بگیر — یک نصب‌کنندهٔ واقعیه (میان‌بر منوی استارت،
+> آیکون دسکتاپ اختیاری، و آیتم Uninstall در Apps & Features) که برای کاربر فعلی در
+> `%LOCALAPPDATA%\Programs\VPeeN` نصب می‌شه و **هیچ دسترسی ادمینی/UAC نمی‌خواد**.
+> نسخهٔ zip برای حالت پرتابل باقی می‌مونه؛ هر دو آپدیت خودکار داخل برنامه رو دارن.
 
 > 🍏 **کاربران مک (Sequoia / Tahoe 26):** چون VPeeN مجانی و متن‌بازه و گواهی پولی Apple Developer
 > نداره، اولین بار Gatekeeper با پیام «Apple could not verify…» جلوی اجرا رو می‌گیره — این هشداره،
@@ -537,6 +594,21 @@ python -m vpeen.cli export nl             # نمایش کانفیگ خام آپ�
 SOCKS5 :  socks5://127.0.0.1:1080
 HTTP   :  http://127.0.0.1:8080
 ```
+
+## 🆕 تازه‌های نسخه ۴.۹ (Sangar — سنگر)
+
+- 🪟 **نصب‌کنندهٔ واقعی ویندوز** — فایل `VPeeN-Setup-x.y.z.exe` با میان‌بر منوی استارت،
+  Uninstaller در Apps & Features و بدون هیچ UAC (نصب per-user مثل VS Code). نسخهٔ پرتابل zip
+  هم مثل قبل هست.
+- 🧱 **کیل‌سوئیچ** — اگه تونل وسط کار بشکنه، ترافیک به‌جای لو رفتن **مسدود** می‌شه (فایروال
+  netsh/iptables) و خودکار تعمیر می‌شه؛ اگه تعمیر نشد، حالت قرمز «کیل‌سوئیچ فعال» می‌مونه.
+  قوانین ژورنال می‌شن و با یک بار اجرای برنامه پاک می‌شن — اینترنتت گیر نمی‌کنه.
+- 🇮🇷 **رابط فارسی راست‌به‌چپ** — تنظیمات → زبان → فارسی؛ کل UI با چیدمان RTL.
+- 🩺 **خودآزمایی محافظت (Doctor)** — دکمهٔ سپر: ۸ بررسی صادقانه روی اتصال زنده (لو رفتن IP،
+  DNS، مسیریابی، کیل‌سوئیچ، QUIC/WebRTC) بدون هیچ سایت خارجی.
+- 🔀 **لیست عبور مستقیم (Split Tunneling)** — تو حالت پراکسی، دامنه‌هایی مثل `*.ir` یا سایت بانک
+  رو مستقیم نگه دار؛ موقع قطع، دقیقاً به حالت قبلی برمی‌گرده.
+- ✅ **۴۳۴ تست در ۱۱ مجموعه** قبل از انتشار سبز شد (۵ مجموعهٔ جدید برای همین قابلیت‌ها).
 
 ## 🆕 تازه‌های نسخه ۴.۷ (Nitro)
 

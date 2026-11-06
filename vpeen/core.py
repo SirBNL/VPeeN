@@ -74,7 +74,10 @@ class Core:
         return self._thread is not None and self._thread.is_alive()
 
     def start(self, region: str | None, bind: str, socks_port: int, http_port: int,
-              set_system: bool) -> None:
+              set_system: bool, bypass: "list[str] | None" = None) -> None:
+        # v4.9.0: `bypass` - split-tunnel domains kept DIRECT while the
+        # system proxy is on (parsed upstream by the web UI / CLI).
+        self._bypass = list(bypass) if bypass else []
         if self.is_busy():
             self.log("Core is already running - ignoring start request.", "warn")
             return
@@ -330,7 +333,8 @@ class Core:
 
             if set_system:
                 try:
-                    system_on(api.state, bind, http_port, socks_port)
+                    system_on(api.state, bind, http_port, socks_port,
+                              bypass=self._bypass)
                     set_system_done = True
                     self._emit(type="system_proxy", on=True)
                     self.log(f"System proxy set -> {bind}:{http_port}", "ok")

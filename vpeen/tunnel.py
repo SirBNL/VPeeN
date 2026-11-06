@@ -42,6 +42,7 @@ ADAPTER_GUID = plat.ADAPTER_GUID
 WORKER_HEARTBEAT_TIMEOUT = 12.0     # seconds without PING -> self-teardown
 WORKER_IDLE_EXIT = 60.0            # no GUI client + idle -> exit (v4.2.3)
 CONNECT_TIMEOUT = 40.0              # GUI wait for worker socket
+WORKER_POLL = 1.0                  # v4.9.0: kill-switch liveness cadence
 
 sys_platform = platform.system().lower()
 
@@ -135,6 +136,11 @@ class TunnelWorker:
                                              # an empty IP set is FATAL
         self.dns_enabled = True
         self.mtu = 1500
+        self.kill_switch = True              # v4.9.0: leak-proof policy
+        self._ks_healing = False             # v4.9.0: repair loop guard
+        self._ks_step = None                 # v4.9.0: active containment step
+        self.KS_REPAIR_TRIES = 3             # respawn attempts before lockdown
+        self.KS_REPAIR_WAIT = 2.0            # pause between attempts
         self._tasks: set = set()            # anchored tasks (asyncio keeps
         self._tun2socks_logf = None        # only weak refs - unanchored
                                             # tasks can be GC'd mid-flight)
@@ -242,6 +248,7 @@ class TunnelWorker:
                 if isinstance(hosts, dict) else {}
             self.strict_ips = bool(cfg.get("strict_ips", False))
             self.dns_enabled = bool(cfg.get("dns", True))
+            self.kill_switch = bool(cfg.get("kill_switch", True))
             # v4.2.2: guard against two "up" commands racing - the old code
             # spawned _up() for each, and two concurrent runs could launch
             # two tun2socks processes and interleave route setup.
@@ -292,6 +299,186 @@ class TunnelWorker:
                 msg += f"; last output:\n{tail}"
             raise OSError(msg)
 
+    def _close_tun2socks_log(self):
+        if self._tun2socks_logf:
+            try:
+                self._tun2socks_logf.close()
+            except Exception:
+                pass
+            self._tun2socks_logf = None
+
+    def _launch_tun2socks(self):
+        """Start tun2socks with the CURRENT worker config (v4.9.0: shared
+        by the initial up() and the kill-switch repair path so a respawn
+        is byte-identical to the original launch)."""
+        exe, _bindir = binary_paths()
+        if not exe:
+            raise OSError("tun2socks binary missing")
+        args = [exe, "--device", self._device_arg(),
+                "--proxy", f"socks5://127.0.0.1:{self.socks_port}",
+                "--mtu", str(self.mtu), "--loglevel", "info"]
+        self.blog(f"starting tun2socks: {' '.join(args)}")
+        flags = 0
+        if os.name == "nt":
+            flags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+        try:
+            self._tun2socks_logf = open(self._tun2socks_log_path(), "ab")
+        except Exception:
+            self._tun2socks_logf = None
+        out = self._tun2socks_logf or subprocess.DEVNULL
+        self.tun2socks = subprocess.Popen(
+            args, cwd=os.path.dirname(exe), creationflags=flags,
+            stdout=out, stderr=out, stdin=subprocess.DEVNULL)
+
+    # ------------------------------------------------ v4.9.0 kill switch
+    def _ks_engage_containment(self):
+        """Raise the firewall containment (SYNC - run in an executor).
+
+        Returns True when rules are active.  The step is journaled into
+        the session file the moment it exists, so even a crash right
+        after this line is recovered by the next-boot sweep."""
+        from . import killswitch
+        try:
+            ok, why = killswitch.available()
+            if not ok:
+                self.blog(f"kill switch: firewall containment unavailable "
+                          f"({why}) - relying on fast repair", "warn")
+                return False
+            step = killswitch.engage()
+            if step is None:
+                self.blog("kill switch: containment rules could not be "
+                          "installed - repair continues without them", "warn")
+                return False
+            self._ks_step = step
+            if self.journal is not None:
+                self.journal.setdefault("ks", []).append(step)
+                try:
+                    plat.save_session({"os": plat.sys_platform,
+                                       "journal": self.journal})
+                except Exception:
+                    pass
+            self.blog("kill switch: firewall containment ACTIVE - "
+                      "nothing leaves this machine while it repairs", "warn")
+            return True
+        except Exception as e:
+            self.blog(f"kill switch engage failed: {e}", "warn")
+            return False
+
+    def _ks_release_containment(self):
+        """Lift the containment rules and drop the journal step (SYNC)."""
+        from . import killswitch
+        try:
+            if self._ks_step is not None:
+                killswitch.release(self._ks_step)
+            self._ks_step = None
+            if self.journal is not None and self.journal.get("ks"):
+                self.journal["ks"] = []
+                try:
+                    plat.save_session({"os": plat.sys_platform,
+                                       "journal": self.journal})
+                except Exception:
+                    pass
+        except Exception as e:
+            _flog(f"kill switch release failed: {e}", "err")
+
+    async def _ks_restart_relay(self):
+        """Re-bind the DNS relay onto the reborn adapter address."""
+        if not self.dns_enabled:
+            return
+        from .dnsrelay import DNSRelay
+        if self.relay is not None:
+            try:
+                await self.relay.stop()
+            except Exception:
+                pass
+            self.relay = None
+        try:
+            self.relay = DNSRelay(socks_dial=self._socks_dial,
+                                  bind_ip=plat.TUN_IP, port=53,
+                                  log=self.blog, pins=self.upstream_hosts)
+            await self.relay.start()
+            self.blog("DNS relay re-bound to the repaired adapter.", "ok")
+        except OSError as e:
+            self.relay = None
+            self.blog(f"DNS relay restart failed: {e} - queries fall back "
+                      "to the physical resolver (still routed through the "
+                      "tunnel)", "warn")
+
+    async def _ks_repair_once(self):
+        """One repair attempt: respawn tun2socks, re-bind routes+address,
+        restart the relay, prove it STAYS alive.  Raises on failure."""
+        if not self.journal:
+            raise OSError("no route journal to rebind")
+        self._launch_tun2socks()
+        await self._wait_adapter()
+        loop = asyncio.get_running_loop()
+        ok, err = await loop.run_in_executor(
+            None, plat.rebind_tun_routes, self.journal)
+        if not ok:
+            raise OSError(err or "route rebind failed")
+        await self._verify_address()
+        await self._ks_restart_relay()
+        await asyncio.sleep(1.2)          # settle: it must STAY alive
+        self._check_tun2socks_alive()
+
+    async def _ks_handle_death(self):
+        """tun2socks died mid-session: the kill-switch core path.
+
+        CONTAIN -> REPAIR (up to 3x) -> lift containment when proven, or
+        LOCKDOWN (containment stays) when repair fails.  The user's
+        traffic is never allowed to silently fall back to the physical
+        route: when tun2socks dies the adapter - and with it the hijack
+        routes - dies too, and without this path every packet would
+        simply leave through the real gateway while the UI still says
+        "Protected"."""
+        if self._ks_healing or self.state != "up":
+            return
+        if not self.clients:
+            # No GUI attached: this worker is orphaned (the GUI died
+            # inside the heartbeat window).  Same policy as heartbeat
+            # loss - contain, never leak, exit; the next app start (or
+            # the next worker boot) sweeps the rules away.
+            rc = self.tun2socks.returncode if self.tun2socks else None
+            self.blog(f"tun2socks died (rc={rc}) with no GUI attached - "
+                      "engaging containment and exiting (kill switch)",
+                      "err")
+            self._close_tun2socks_log()
+            self.tun2socks = None
+            self._ks_engage_containment()      # sync: we exit right after
+            os._exit(0)
+        self._ks_healing = True
+        try:
+            rc = self.tun2socks.returncode if self.tun2socks else None
+            self._close_tun2socks_log()
+            self.tun2socks = None
+            self.broadcast({"ev": "ks_engaged", "rc": rc})
+            self.blog(f"tun2socks died (rc={rc}) - kill switch ENGAGED: "
+                      "outbound traffic is blocked, not leaked", "err")
+            loop = asyncio.get_running_loop()
+            loop.run_in_executor(None, self._ks_engage_containment)
+            for attempt in range(1, self.KS_REPAIR_TRIES + 1):
+                self.blog(f"kill switch: repairing the tunnel "
+                          f"({attempt}/{self.KS_REPAIR_TRIES})...", "warn")
+                try:
+                    await self._ks_repair_once()
+                    # containment lifts ONLY after the hijack is proven
+                    # back in place - that ordering is what makes the
+                    # repair path leak-free.
+                    loop.run_in_executor(None, self._ks_release_containment)
+                    self.broadcast({"ev": "ks_healed"})
+                    self.blog("kill switch: tunnel REPAIRED - protection "
+                              "restored with no leak window", "ok")
+                    return
+                except Exception as e:
+                    self.blog(f"repair attempt failed: {e}", "warn")
+                    await asyncio.sleep(self.KS_REPAIR_WAIT)
+            self.broadcast({"ev": "ks_lockdown"})
+            self.blog("KILL SWITCH LOCKDOWN: traffic stays BLOCKED - this "
+                      "is the safe state. Disconnect to restore your "
+                      "normal network, or connect again to retry.", "err")
+        finally:
+            self._ks_healing = False
+
     async def _up(self):
         if self.state == "up":
             await self._down("re-connecting")
@@ -332,21 +519,9 @@ class TunnelWorker:
             #    its outbound socket to the physical interface was pure
             #    risk on some stacks (a loopback destination through a
             #    bound physical interface is not guaranteed to work).
-            args = [exe, "--device", device,
-                    "--proxy", f"socks5://127.0.0.1:{self.socks_port}",
-                    "--mtu", str(self.mtu), "--loglevel", "info"]
-            self.blog(f"starting tun2socks: {' '.join(args)}")
-            flags = 0
-            if os.name == "nt":
-                flags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
-            try:
-                self._tun2socks_logf = open(self._tun2socks_log_path(), "ab")
-            except Exception:
-                self._tun2socks_logf = None
-            out = self._tun2socks_logf or subprocess.DEVNULL
-            self.tun2socks = subprocess.Popen(
-                args, cwd=os.path.dirname(exe), creationflags=flags,
-                stdout=out, stderr=out, stdin=subprocess.DEVNULL)
+            #    v4.9.0: the launch lives in _launch_tun2socks() so the
+            #    kill-switch repair path can respawn it identically.
+            self._launch_tun2socks()
 
             # 2. wait for the ADAPTER to appear.  v4.2.0 fix: the old code
             #    waited for the adapter ADDRESS (198.18.0.1) here, but that
@@ -405,6 +580,12 @@ class TunnelWorker:
             self.broadcast({"ev": "up"})
             self.blog("Tunnel is UP - all traffic now flows through VPeeN.",
                       "ok")
+            # v4.9.0: a dying orphaned worker may have engaged containment
+            # AFTER this worker's boot sweep (reconnect race).  Rules can
+            # never legitimately belong to THIS fresh tunnel (containment
+            # only engages on tun2socks death), so sweep them once more.
+            asyncio.get_running_loop().run_in_executor(
+                None, _stale_ks_rules_only)
         except Exception as e:
             self.blog(f"Tunnel UP failed: {e}", "err")
             await self._down("failed")
@@ -661,6 +842,7 @@ class TunnelWorker:
             except Exception:
                 pass
             self._tun2socks_logf = None
+        self._ks_step = None          # bring_down() released the rules
         if self.journal:
             try:
                 plat.bring_down(self.journal)
@@ -681,9 +863,30 @@ class TunnelWorker:
     # ------------------------------------------------------------- watchdog
     async def _watchdog(self):
         while True:
-            await asyncio.sleep(2)
+            await asyncio.sleep(WORKER_POLL)
+            # v4.9.0 kill switch: liveness of tun2socks while the tunnel
+            # is up.  A dead tun2socks means the adapter (and every
+            # hijack route on it) is gone and the machine is leaking
+            # through the physical gateway RIGHT NOW - hand the case to
+            # the kill-switch handler within one poll interval.
+            if self.state == "up" and self.tun2socks is not None:
+                if self.tun2socks.poll() is not None and not self._ks_healing:
+                    self._spawn(self._ks_handle_death())
             if self.state == "up" and \
                     time.time() - self.last_ping > WORKER_HEARTBEAT_TIMEOUT:
+                if self.kill_switch:
+                    # GUI is gone; the local SOCKS core died with it, so
+                    # the still-hijacked routes blackhole everything -
+                    # the SAFE state.  Restoring the routes instead (the
+                    # pre-4.9 behaviour) would silently send the user's
+                    # traffic out through the real network with no app
+                    # running and no protection at all.  tun2socks is
+                    # deliberately left ALIVE: killing it would destroy
+                    # the adapter and drop the hijack (= leak).
+                    _flog("GUI heartbeat lost - kill switch: keeping the "
+                          "blackhole (network stays OFFLINE, nothing "
+                          "leaks; start VPeeN again to restore)", "err")
+                    os._exit(0)
                 _flog("GUI heartbeat lost - emergency teardown", "err")
                 await self._down("heartbeat lost")
                 os._exit(0)          # never linger after the GUI is gone
@@ -774,12 +977,13 @@ class TunnelController:
     def connect(self, socks_port: int, upstream_ips: list[str],
                 upstream_hosts: "dict[str, list[str]] | None" = None,
                 mtu: int = 1500, dns: bool = True,
-                strict_ips: bool = False) -> None:
+                strict_ips: bool = False,
+                kill_switch: bool = True) -> None:
         if self.state in ("starting", "up"):
             return
         threading.Thread(target=self._connect_sync,
                          args=(socks_port, upstream_ips, upstream_hosts,
-                               mtu, dns, strict_ips),
+                               mtu, dns, strict_ips, kill_switch),
                          daemon=True, name="vpeen-tunnelctl").start()
 
     def _elevated_spawn(self, args: list[str]) -> None:
@@ -815,7 +1019,7 @@ class TunnelController:
                            check=True, timeout=120, capture_output=True)
 
     def _connect_sync(self, socks_port, upstream_ips, upstream_hosts,
-                      mtu, dns, strict_ips):
+                      mtu, dns, strict_ips, kill_switch=True):
         try:
             ok, why = tunnel_available()
             if not ok:
@@ -850,7 +1054,8 @@ class TunnelController:
             self._cfg = {"socks_port": socks_port, "upstream_ips": upstream_ips,
                          "upstream_hosts": upstream_hosts or {},
                          "strict_ips": bool(strict_ips),
-                         "mtu": mtu, "dns": dns}
+                         "mtu": mtu, "dns": dns,
+                         "kill_switch": bool(kill_switch)}
             self._send({"cmd": "up", "cfg": self._cfg})
             self._start_threads()
         except Exception as e:
@@ -916,6 +1121,10 @@ class TunnelController:
         elif ev == "down":
             self.state = "down"
             self._emit(phase="down", detail=msg.get("error", ""))
+        elif ev in ("ks_engaged", "ks_healed", "ks_lockdown"):
+            # v4.9.0 kill switch: forwarded verbatim so the GUI can show
+            # the repair / lockdown state instead of a fake "Protected".
+            self._emit(phase=ev, detail=str(msg.get("rc", "")))
         elif ev == "hello":
             pass
 
@@ -955,6 +1164,56 @@ class TunnelController:
 
 
 # ------------------------------------------------------------ worker entry
+def _stale_ks_rules_only():
+    """Best-effort stale-rule sweep without the tun2socks hygiene (used
+    after a fresh tunnel comes up - killing tun2socks there would be
+    killing OUR OWN)."""
+    try:
+        from . import killswitch
+        killswitch.sweep_stale()
+    except Exception:
+        pass
+
+
+def _sweep_worker_boot():
+    """v4.9.0 single-instance hygiene, run elevated at worker boot:
+
+    * stale VPeeN-KS firewall rules are removed (a hard crash inside a
+      lockdown could otherwise leave the machine firewalled forever)
+    * an ORPHANED tun2socks from a crashed worker is killed, but ONLY
+      when our TUN adapter still exists - the orphan holds the adapter
+      name, and a fresh tun2socks would fail to create it.  Killing it
+      cannot leak: its routes point into a dead tunnel and the journal
+      sweep has already replayed them away.
+    """
+    try:
+        from . import killswitch
+        killswitch.sweep_stale()
+    except Exception:
+        pass
+    try:
+        exe, _bindir = binary_paths()
+        if not exe:
+            return
+        if sys_platform.startswith("win"):
+            if plat._win_tun_index() is not None:
+                subprocess.run(["taskkill", "/F", "/IM", "tun2socks.exe"],
+                               capture_output=True, timeout=10)
+        elif sys_platform == "linux":
+            if os.path.exists(
+                    f"/sys/class/net/{plat.TUN_NAME['linux']}"):
+                subprocess.run(["pkill", "-f", exe],
+                               capture_output=True, timeout=10)
+        elif sys_platform == "darwin":
+            rc, _out, _err = plat.run(["ifconfig", plat.TUN_NAME["darwin"]],
+                                      timeout=10)
+            if rc == 0:
+                subprocess.run(["pkill", "-f", exe],
+                               capture_output=True, timeout=10)
+    except Exception:
+        pass
+
+
 def _arg_value(argv, flag, default=None):
     """v4.3.1: safe flag lookup - argv.index(flag) + 1 raised IndexError
     whenever a --ctl-port/--ctl-token/--session flag arrived without its
@@ -980,6 +1239,7 @@ def _worker_main(ctl_port: int, ctl_token: str) -> int:
     # tunnel_platforms logs via print(); the frozen windowed worker has no
     # console, so route platform-level logs into the worker log file too
     plat._log = lambda msg, lvl="info": _flog(msg, lvl)
+    _sweep_worker_boot()
     worker = TunnelWorker(ctl_port, ctl_token)
     try:
         asyncio.run(worker.amain())
