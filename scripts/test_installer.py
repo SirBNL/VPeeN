@@ -224,6 +224,34 @@ def test_workflow():
     check("2k Compress-Archive still zips dist/VPeeN.exe",
           "Compress-Archive -Path dist/VPeeN.exe" in text)
 
+    # v4.9.0: full-asset checksums, changelog release body, canary
+    check("2l extension zip is built into release/ so it gets checksummed",
+          "release/VPeeN-Chrome-Extension.zip" in text)
+    check("2m sums tripwire requires >= 5 checksummed assets",
+          "-ge 5" in text)
+    check("2n release body ships the matching CHANGELOG (guarded fallback)",
+          "CHANGELOG-${GITHUB_REF_NAME}.md" in text
+          and "release-body.md" in text)
+
+    canary_yml = os.path.join(REPO, ".github", "workflows", "canary.yml")
+    check("2o release canary workflow exists", os.path.isfile(canary_yml))
+    if os.path.isfile(canary_yml):
+        canary_text = open(canary_yml, encoding="utf-8").read()
+        check("2p canary is read-only (contents: read)",
+              "contents: read" in canary_text)
+        check("2q canary runs the watchdog script",
+              "scripts/canary_check.sh" in canary_text)
+        check("2q2 canary verifies the setup installer exists",
+              "VPeeN-Setup" in open(os.path.join(REPO, "scripts",
+                                                 "canary_check.sh"),
+                                    encoding="utf-8").read())
+    check("2r release-tools workflow exists (dispatchable sums repair)",
+          os.path.isfile(os.path.join(REPO, ".github", "workflows",
+                                      "release-tools.yml")))
+    check("2s release_sums tool refuses mismatched recorded hashes",
+          "REFUSING" in open(os.path.join(REPO, "scripts", "release_sums.py"),
+                             encoding="utf-8").read())
+
 
 # ===================================================== 3. updater compat
 def test_updater():

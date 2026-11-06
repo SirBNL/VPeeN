@@ -1,0 +1,33 @@
+name: Release canary
+
+# v4.9.0 "Sangar" post-publication watchdog.  Runs daily (and on demand)
+# and verifies the LATEST release is exactly what CI published:
+#   1. the release is reachable and tagged vX.Y.Z
+#   2. the Windows Setup installer asset exists        (the #1 promise)
+#   3. every hash in SHA256SUMS.txt matches a fresh download
+#   4. every release asset has a sums entry            (nothing unverified)
+#   5. asset structure is sane (exe = MZ, zip = PK, tar.gz = gzip magic)
+#   6. no newer v* tag exists without its release      (publish failures)
+#
+# READ-ONLY by design: a canary cannot break the thing it watches.  Any
+# drift fails this workflow loudly so the maintainer is alerted at once.
+
+on:
+  schedule:
+    - cron: "30 6 * * *"   # daily 06:30 UTC = 10:00 Tehran
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  canary:
+    name: Verify latest release integrity
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Run release canary
+        run: bash scripts/canary_check.sh
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

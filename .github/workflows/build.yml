@@ -208,39 +208,54 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      # v4.6.0 (issue #2): ship the VPeeN Bridge Chrome extension as a
-      # load-unpacked zip attached to every release.
-      - name: Package Chrome extension
-        run: |
-          mkdir -p release-tmp
-          cd extension
-          zip -r ../release-tmp/VPeeN-Chrome-Extension.zip .
-
       - name: Download all artifacts
         uses: actions/download-artifact@v4
         with:
           merge-multiple: true
           path: release
 
+      # v4.6.0 (issue #2): ship the VPeeN Bridge Chrome extension as a
+      # load-unpacked zip attached to every release.
+      # v4.9.0: it is built into release/ so it is an asset like any
+      # other and gets a SHA256SUMS entry - it used to ship unverified.
+      - name: Package Chrome extension
+        run: |
+          mkdir -p release
+          cd extension
+          zip -r ../release/VPeeN-Chrome-Extension.zip .
+
       # v4.8.0 "Sentinel": checksum every asset.  The in-app self-updater
       # refuses to install ANY release that lacks a matching SHA256SUMS.txt
       # entry - integrity between CI and the user's disk is the contract
       # that makes one-click updates safe.
+      # v4.9.0: sums are written OUTSIDE release/, so the file never hashes
+      # itself and every asset in the directory - the 4 platform binaries
+      # AND the extension zip - is covered.  The -ge 5 tripwire fails the
+      # release if any asset went missing from the checksum contract.
       - name: Generate SHA256SUMS.txt
         run: |
           cd release
-          sha256sum * > ../release-tmp/SHA256SUMS.txt
-          cd ../release-tmp
+          sha256sum * > ../SHA256SUMS.txt
+          cd ..
           cat SHA256SUMS.txt
-          # the updater never verifies the sums file against itself
-          grep -v ' SHA256SUMS.txt$' SHA256SUMS.txt > SHA256SUMS.tmp || true
-          [ -s SHA256SUMS.tmp ] || cp SHA256SUMS.txt SHA256SUMS.tmp
-          mv SHA256SUMS.tmp SHA256SUMS.txt
+          [ "$(wc -l < SHA256SUMS.txt)" -ge 5 ]
+
+      # v4.9.0: publish the matching CHANGELOG-vX.Y.Z.md as the release
+      # body.  The guard means a missing changelog can never break a
+      # release - it falls back to a plain link to the commits.
+      - name: Prepare release body
+        run: |
+          if [ -f "CHANGELOG-${GITHUB_REF_NAME}.md" ]; then
+            cp "CHANGELOG-${GITHUB_REF_NAME}.md" release-body.md
+          else
+            printf 'See the [commits](https://github.com/SirBNL/VPeeN/commits/%s) for what changed.\n' "${GITHUB_REF_NAME}" > release-body.md
+          fi
 
       - name: Attach binaries to GitHub Release
         uses: softprops/action-gh-release@v2
         with:
           files: |
             release/*
-            release-tmp/*
+            SHA256SUMS.txt
+          body_path: release-body.md
           generate_release_notes: true

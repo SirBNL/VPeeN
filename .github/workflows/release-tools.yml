@@ -1,0 +1,33 @@
+name: Release tools
+
+# v4.9.0 "Sangar" ops toolbox.  Manual, maintainer-only helpers for the
+# LIVE release.  Everything here is dispatchable on demand; nothing runs
+# on a schedule and nothing touches the repository state.
+#
+#   repair-sums  - rebuild SHA256SUMS.txt for the latest release
+#                  (surgical: appends missing entries only, refuses if a
+#                  recorded hash does not match the live asset)
+
+on:
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "Only print the plan, change nothing"
+        type: boolean
+        default: false
+
+permissions:
+  contents: write
+
+jobs:
+  repair-sums:
+    name: Rebuild SHA256SUMS.txt (latest release)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Run release_sums tool
+        run: python scripts/release_sums.py
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          DRY_RUN: ${{ inputs.dry_run && '1' || '0' }}

@@ -321,9 +321,9 @@ VPeeN/
 ├── installer/vpeen.iss   # Inno Setup script → VPeeN-Setup-x.y.z.exe (CI)
 ├── extension/            # "VPeeN Bridge" Chrome extension (MV3)
 ├── assets/               # icon, logo, banner, flags/ (92 circular flags)
-├── scripts/              # fetch-binaries + the 11 verification test suites
+├── scripts/              # fetch-binaries + 11 verification suites + release canary/tools
 ├── docs/                 # screenshots + demo GIF
-└── .github/workflows/    # multi-OS build + release pipeline (test gate)
+└── .github/workflows/    # multi-OS build + release pipeline (test gate + release canary)
 ```
 
 ## 🧾 Third-party components
