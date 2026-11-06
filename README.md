@@ -13,9 +13,11 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-00d68f.svg?style=for-the-badge&labelColor=0e1526)](LICENSE)
 [![Platform](https://img.shields.io/badge/Platform-Windows%20%7C%20macOS%20%7C%20Linux-2f81f7.svg?style=for-the-badge&labelColor=0e1526)](#-quick-start)
 [![Python](https://img.shields.io/badge/Python-3.9%2B-ffd43b.svg?style=for-the-badge&labelColor=0e1526)](https://www.python.org/)
-[![GUI](https://img.shields.io/badge/GUI-Aurora%20v4.5-2de3a7.svg?style=for-the-badge&labelColor=0e1526)](CHANGELOG-v4.5.0.md)
+[![GUI](https://img.shields.io/badge/GUI-Sangar%20v4.9-2de3a7.svg?style=for-the-badge&labelColor=0e1526)](CHANGELOG-v4.9.0.md)
 [![Release](https://img.shields.io/github/v/release/SirBNL/VPeeN?style=for-the-badge&labelColor=0e1526&color=00d68f)](../../releases)
 [![Stars](https://img.shields.io/github/stars/SirBNL/VPeeN?style=for-the-badge&labelColor=0e1526&color=ffcb2f)](../../stargazers)
+
+[Quick start](#-quick-start) · [Tunnel mode & kill switch](#-tunnel-mode--a-real-vpn-the-hiddify-way) · [FAQ](#-faq) · [Version history](#-version-history) · [🇮🇷 راهنمای فارسی](#-راهنمای-فارسی)
 
 <img src="docs/demo.gif" alt="VPeeN Aurora UI — the aurora-dart cursor connects, watches the handshake, switches to Amsterdam, copies the exit IP and inspects live logs" width="88%"/>
 
@@ -33,15 +35,15 @@ global proxy network. **VPeeN** speaks the same protocol natively and brings tho
 - 🙈 **Anonymous** — guest tokens only, nothing to sign up for
 - 🚪 **Browser-free** — Chrome can stay closed; VPeeN talks to the network directly
 - 🧩 **Standard interfaces** — plain SOCKS5 and HTTP proxies on localhost
+- 🪟 **A real Windows installer (v4.9)** — `VPeeN-Setup-x.y.z.exe`: Start Menu, uninstaller, zero UAC
+- 🧱 **Leak-proof by design (v4.9)** — a firewall-grade kill switch, a one-click self-check,
+  split tunneling and a Persian (RTL) UI on top of the v4.8 auto-updater
+- ⚡ **Fast by construction (v4.5–v4.7)** — pre-warmed TLS connections, hedged connects and
+  throughput-ranked servers: every proxied connection costs ~1 round-trip, a stalled server
+  costs 0.35 s instead of 8 s, and repeated DNS lookups are answered from a local cache
 - 🎨 **“Aurora” GUI (v4.4)** — an animated power orb, drifting aurora gradients, live
   latency bars and realtime traffic stats — a local web app in a native window
   (pywebview) or your browser. No Tk, no Electron, no heavy frameworks
-- ⚡ **“Velocity” networking (v4.5)** — pre-warmed TLS connections cut every proxied
-  connection from ~3 round-trips to 1, blackholed server addresses are raced
-  Happy-Eyeballs style instead of timing out, servers are auto-ranked fastest-first,
-  and repeated DNS lookups are answered from a local cache
-- 🧱 **Leak-proof by design (v4.9)** — a real kill switch, a one-click self-check and a Persian (RTL) UI on top of the v4.8 auto-updater
-- 🪟 **A real Windows installer (v4.9)** — `VPeeN-Setup-x.y.z.exe`: Start Menu, uninstaller, zero UAC
 - 🆓 **Free-tier honest** — the list shows the 7 locations the free network actually
   serves, with real measured latency; the 178 premium ones are hidden instead of failing
 
@@ -289,7 +291,9 @@ pyinstaller vpeen.spec --noconfirm
 - **Windows** → `dist/VPeeN.exe`  ·  **macOS** → `dist/VPeeN.app`  ·  **Linux** → `dist/VPeeN`
 
 Every push is built for all three platforms by [GitHub Actions](.github/workflows/build.yml);
-version tags (`v*`) automatically produce a [release](../../releases) with binaries.
+version tags (`v*`) automatically produce a [release](../../releases) with binaries —
+on Windows the **Setup installer** is compiled with Inno Setup from
+[`installer/vpeen.iss`](installer/vpeen.iss).
 
 ## 📁 Project structure
 
@@ -299,22 +303,27 @@ VPeeN/
 ├── vpeen/
 │   ├── gui.py            # desktop window launcher (pywebview → browser fallback)
 │   ├── webui.py          # local web-UI server + core/tunnel bridge (loopback only)
-│   ├── web/              # the "Aurora" GUI (index.html / style.css / app.js)
+│   ├── web/              # the "Aurora" GUI (index.html / style.css / app.js, EN+FA)
 │   ├── core.py           # background proxy engine + GUI event bridge
 │   ├── api.py            # VeePN network client (tokens, locations, servers)
 │   ├── upstream.py       # encrypted upstream tunnels
 │   ├── localproxy.py     # local SOCKS5 + HTTP servers
 │   ├── tunnel.py         # VPN tunnel orchestration (elevated worker + controller)
 │   ├── tunnel_platforms.py  # per-OS TUN routes / DNS / session journal
+│   ├── killswitch.py     # firewall-grade kill switch (detect → contain → repair)
+│   ├── doctor.py         # 8-check protection self-check (Doctor)
 │   ├── dnsrelay.py       # DNS relay that tunnels DNS through VPeeN
-│   ├── systemproxy.py    # OS proxy switch (Win / macOS / GNOME)
+│   ├── systemproxy.py    # OS proxy switch + bypass list (Win / macOS / GNOME)
+│   ├── selfupdate.py     # one-click self-updater (+ installed-version sync)
 │   ├── settings.py       # persistent app settings (atomic writes)
 │   ├── cli.py            # headless command-line mode
 │   └── utils.py          # shared helpers
+├── installer/vpeen.iss   # Inno Setup script → VPeeN-Setup-x.y.z.exe (CI)
+├── extension/            # "VPeeN Bridge" Chrome extension (MV3)
 ├── assets/               # icon, logo, banner, flags/ (92 circular flags)
-├── scripts/fetch-binaries.py  # pinned download of tun2socks + wintun (build-time only)
+├── scripts/              # fetch-binaries + the 11 verification test suites
 ├── docs/                 # screenshots + demo GIF
-└── .github/workflows/    # multi-OS build + release pipeline
+└── .github/workflows/    # multi-OS build + release pipeline (test gate)
 ```
 
 ## 🧾 Third-party components
@@ -324,7 +333,20 @@ VPeeN/
 | [tun2socks](https://github.com/xjasonlyu/tun2socks) v2.7.0 | **MIT** | TUN engine for Tunnel mode (fetched at build time, never at runtime) |
 | [wintun](https://www.wintun.net/) 0.14.1 | Wintun Prebuilt Binaries License | signed virtual-adapter driver (Windows, used via its permitted API) |
 | [pywebview](https://pywebview.ngole.io/) | BSD-3 | native desktop window for the web GUI (optional; falls back to the browser) |
+| [Inno Setup](https://jrsoftware.org/isinfo.php) | Inno Setup License | compiles the Windows installer in CI (build-time only) |
 | Flags | [flagcdn](https://flagcdn.com/) (public domain) | circular country flags |
+
+## 📜 Version history
+
+| Version | Codename | Highlights | Full notes |
+|---|---|---|---|
+| **v4.9.0** | **Sangar** (سنگر) | Windows Setup installer · firewall kill switch · Persian RTL UI · split tunneling · Doctor self-check | [CHANGELOG-v4.9.0.md](CHANGELOG-v4.9.0.md) |
+| v4.8.0 | Sentinel | Tunnel-mode root-cause fixes (the “connected but dead” blackhole, stale hijack routes) · one-click self-updater · CI test gate | [CHANGELOG-v4.8.0.md](CHANGELOG-v4.8.0.md) |
+| v4.7.0 | Nitro | Hedged connects + resolver singleflight — tail latency 8 s → 0.35 s · adaptive warm pool | [CHANGELOG-v4.7.0.md](CHANGELOG-v4.7.0.md) |
+| v4.6.0 | Turbo | 3.4× faster connection setup · throughput-ranked servers · Chrome extension · macOS Gatekeeper fixes | [CHANGELOG-v4.6.0.md](CHANGELOG-v4.6.0.md) |
+| v4.5.0 | Velocity | Pre-warmed TLS pool · Happy-Eyeballs racing · latency-ranked servers | [CHANGELOG-v4.5.0.md](CHANGELOG-v4.5.0.md) |
+| v4.4.0 | Aurora | The local-web-app GUI · live latency + traffic rates · 12-fix audit pass | [CHANGELOG-v4.4.0.md](CHANGELOG-v4.4.0.md) |
+| v4.3.x | — | Security pass: proxy auth, bind safety, UDP-DNS ASSOCIATE, secrets hygiene | [CHANGELOG-v4.3.1.md](CHANGELOG-v4.3.1.md) |
 
 ## ❓ FAQ
 
@@ -351,134 +373,19 @@ through the tunnel), which keeps tun2socks-based setups working.
 </details>
 
 <details>
+<summary><b>What does the kill switch protect me from?</b></summary>
+The moment the tunnel worker dies, the firewall containment drops all non-loopback traffic
+while VPeeN repairs the tunnel — so nothing leaks through your real gateway in the gap.
+If repair fails, the containment stays (a red <i>Kill Switch ON</i> state) until you act.
+It is on by default in tunnel mode; rules are journaled and swept on the next launch, so
+a crashed VPeeN can never brick your internet.
+</details>
+
+<details>
 <summary><b>Where is my data stored?</b></summary>
 Only <code>~/.vpeen/</code> on your machine — cached token, servers and settings. Nothing is sent
 anywhere else. The state file (which contains the access token) is written with <code>0600</code>
 permissions and the directory with <code>0700</code> (POSIX), so only your user can read it.
-</details>
-
-<details>
-<summary><b>What changed in v4.7.0 (Nitro)?</b></summary>
-<ul>
-<li><b>Hedged connects — the end of tail latency</b> — when the chosen server's
-TLS handshake has not landed within 350 ms, a parallel backup connect to the
-next-best server starts and the first success wins. A stalled "best" server
-used to cost every connection of a burst its full 8 s budget; it now costs
-0.35 s. The loser is reaped in the background (never cancelled — that is a
-socket-leak path) with no breaker penalty, and hedges only fire when a
-handshake permit is free, so bursts never double their load.</li>
-<li><b>Resolver cache with singleflight</b> — every fresh connect used to pay a
-blocking <code>getaddrinfo</code> (on Windows the resolver also tries LLMNR/mDNS
-first — routinely 50–200 ms). Resolved IPs are cached for 60 s and shared by
-connects, refill waves and probes; a 30-socket burst now produces ONE lookup.
-A dead resolver serves the stale cached answer instead of failing.</li>
-<li><b>Happy-Eyeballs across DNS records</b> — a server given by hostname is
-expanded to its A/AAAA records and all of them race staggered; a blackholed
-first record costs 150 ms instead of the full timeout. SNI and certificate
-validation still use the original hostname.</li>
-<li><b>Adaptive warm-pool TTL (8–25 s)</b> — servers that reap idle sockets fast
-no longer turn warm hits into failed CONNECTs: each stale entry shrinks the
-TTL, and it recovers between probe cycles.</li>
-<li><b>Demand-adaptive pool size (12→24)</b> — the refill target follows the last
-10 s of connection demand, so the burst after a burst starts pre-paid.</li>
-<li><b>Throughput ranking that ages</b> — measurements rank a server for 10 minutes
-and the top candidates are re-measured every ~3 min, so a collapsed "best"
-server is demoted mid-session.</li>
-<li><b>Also</b>: handshake window 12→16, DNS-relay cache 30→60 s, and the UI shows
-"N rescued" (hedges) next to "N warm".</li>
-<li><b>Tests:</b> 135 checks green (42 speed-pass + 59 + 11 + 23). Full list:
-<a href="CHANGELOG-v4.7.0.md">CHANGELOG-v4.7.0.md</a>.</li>
-</ul>
-</details>
-
-<details>
-<summary><b>What changed in v4.6.0 (Turbo)?</b></summary>
-<ul>
-<li><b>Pool-aware scheduling (fixed the 1/N bug)</b> — v4.5.0's warm pool only matched the
-round-robin cursor's server, so with 3 servers two thirds of every browsing burst still
-paid full TLS handshakes. Every connection now takes the newest warm connection,
-whatever server it belongs to: <b>3.4× faster connection setup</b> measured on the real
-free network.</li>
-<li><b>Bigger pool, filled in parallel</b> — 12 warm connections (was 4), refilled in
-parallel waves, pre-warmed from the moment you connect — the <i>first</i> page load is
-fast now too, not just the tenth.</li>
-<li><b>Throughput ranking — the server-side signal</b> — at connect time each top server
-is measured with a real 128 KiB download through its own tunnel; the best-bandwidth
-server gets the traffic, not merely the lowest-ping one. Re-measured every 60 s.</li>
-<li><b>Chrome extension (VPeeN Bridge)</b> — issue #2: a 2-permission MV3 extension that
-routes all of Chrome through the local SOCKS5 tunnel with one click. Ships with every
-release.</li>
-<li><b>macOS Gatekeeper</b> — issue #1: release builds are ad-hoc code-signed and the
-README documents the two-click “Open Anyway” path for Sequoia/Tahoe 26.</li>
-<li><b>Also</b>: handshake concurrency 8→12, macOS socket buffers (512 KiB), faster
-Happy-Eyeballs stagger (150 ms), DNS cache TTL 60 s, `N warm` live in the stats line,
-and a fixed v4.5.0 latent bug where the latency map kept stale indices after the
-startup reorder.</li>
-<li><b>Tests:</b> 118 checks green (25 speed-pass + 59 + 11 + 23) plus a real-network
-A/B benchmark. Full list: <a href="CHANGELOG-v4.6.0.md">CHANGELOG-v4.6.0.md</a>.</li>
-</ul>
-</details>
-
-<details>
-<summary><b>What changed in v4.5.0 (Velocity)?</b></summary>
-<ul>
-<li><b>Pre-warmed TLS connection pool</b> — every proxied connection used to pay TCP +
-full TLS handshake + CONNECT (~3 round-trips) before its first byte. The proxy now keeps
-TLS-established connections warm in the background, so a client CONNECT costs a single
-round-trip. Stale warm connections (silently reaped by the server) are detected instantly
-and retried transparently.</li>
-<li><b>Happy-Eyeballs address racing</b> — a blackholed server address costs 250 ms
-instead of the full 8 s timeout before the next one is tried.</li>
-<li><b>Latency-ranked servers</b> — at startup every server in the region is probed
-concurrently and the list is reordered fastest-first; the GUI’s per-region ping reports
-the region’s best server, not just its first entry.</li>
-<li><b>Instant “connected”</b> — the UI flips to connected the moment the local proxies
-are live; the exit IP is verified in the background instead of blocking the phase.</li>
-<li><b>Throughput & CPU</b> — 256 KiB relay buffers (was 64 KiB), cached SSL contexts
-(no CA-bundle reload per connection), TCP_NODELAY + Windows buffer tuning, and a
-DNS cache for the SOCKS5 UDP-DNS path.</li>
-<li><b>Tests:</b> 17 speed-pass checks + the 23-check live demo-server suite.
-Full list: <a href="CHANGELOG-v4.5.0.md">CHANGELOG-v4.5.0.md</a>.</li>
-</ul>
-</details>
-
-<details>
-<summary><b>What changed in v4.4.0 (Aurora)?</b></summary>
-<ul>
-<li><b>The GUI is a local web app now.</b> A loopback-only server (pure stdlib) runs the proxy
-core and streams events to a vanilla HTML/CSS/JS interface — shown in a native pywebview window
-or your browser. CustomTkinter, Pillow and the whole Tk runtime are gone: smaller bundles,
-faster startup, and a UI Tk could never render (gradients, glow, smooth animations).</li>
-<li><b>Live latency + live traffic rates</b> in the location list and stat cards.</li>
-<li><b>Audit pass:</b> 12 defects found and fixed in the new bridge/UI — including a demo-data
-crash on connect, tunnel mode never reporting the exit country, an 8-second hang on tunnel
-disconnect, silent saving of invalid ports/MTU, and HTTP handlers that died mid-response on
-bridge errors. Full list with test evidence:
-<a href="CHANGELOG-v4.4.0.md">CHANGELOG-v4.4.0.md</a>.</li>
-<li><b>Test suites:</b> 27 new end-to-end checks (<code>scripts/test_webui_demo.py</code>) on top
-of the existing 59 + 11.</li>
-</ul>
-</details>
-
-<details>
-<summary><b>What changed in v4.3.0 (security pass)?</b></summary>
-<ul>
-<li><b>Local proxy auth</b> — the CLI (<code>python -m vpeen.cli run</code>) accepts
-<code>--proxy-user/--proxy-pass</code>: RFC 1929 for SOCKS5, Basic for HTTP.</li>
-<li><b>Bind safety</b> — a non-loopback bind without credentials is refused outright; the GUI is
-loopback-only and its Bind field is now actually applied (it used to be stored but ignored).</li>
-<li><b>Explicit TUN failure</b> — no more silent fallback to proxy mode: loud warning, or full stop
-if you disable the “Fall back to proxy mode” switch in Settings.</li>
-<li><b>UDP ASSOCIATE (DNS)</b> — DNS datagrams are relayed through the tunnel; other UDP is dropped
-deliberately (the upstream is TCP-only).</li>
-<li><b>Secrets hygiene</b> — <code>export</code> masks the upstream password unless
-<code>--show-secrets</code>; state files are 0600/0700.</li>
-<li><b>API hardening</b> — reserve API domains must be HTTPS with a sane hostname before the Bearer
-token is ever sent there, every domain in the rotation is actually tried, and one request can
-never stall past a 120s wall-clock budget.</li>
-<li><b>macOS restore fidelity</b> — the pre-existing per-service proxy (enabled, host, port) is
-backed up and restored exactly, instead of blindly switching proxies off.</li>
-</ul>
 </details>
 
 <details>
@@ -510,6 +417,10 @@ Respect the laws of your country and the networks you connect to.
 - 📡 **آمار زنده** — حجم دانلود/آپلود **با نرخ لحظه‌ای**، تایمر جلسه و شمارنده اتصال‌ها، هر ثانیه آپدیت
 - 🕵️ **مانیتور IP** — زمان قطع: IP واقعی تو؛ زمان اتصال: IP خروجی — با یک کلیک کپی می‌شه
 - 🔒 **تانل واقعی VPN (حالت TUN)** — تانل کامل مثل Hiddify؛ کل ترافیک سیستم بدون هیچ تنظیماتی
+- 🧱 **کیل‌سوئیچ (۴.۹)** — اگه تانل وسط کار بشکنه، ترافیک به‌جای لو رفتن **مسدود** می‌شه و خودکار تعمیر می‌شه
+- 🩺 **خودآزمایی محافظت (۴.۹)** — دکمهٔ سپر: ۸ بررسی صادقانه روی اتصال زنده (لو رفتن IP، DNS، کیل‌سوئیچ، QUIC/WebRTC)
+- 🔀 **لیست عبور مستقیم (۴.۹)** — دامنه‌هایی مثل `*.ir` یا سایت بانک مستقیم بمونن، بقیه از تانل
+- 🇮🇷 **رابط فارسی راست‌به‌چپ (۴.۹)** — تنظیمات → زبان → فارسی؛ کل چیدمان RTL می‌شه
 - 🖥️ **حالت پروکسی سیستم** — SOCKS5/HTTP کلاسیک با ست/بازیابی خودکار پروکسی سیستم‌عامل
 - 🛡️ **ضد نشت DNS** — در حالت تانل، خود DNS هم از داخل تانل رد می‌شه
 - 📜 **لاگ کامل فعالیت** — رنگی، اسکرول خودکار، با یک کلیک کپی
@@ -529,12 +440,12 @@ Respect the laws of your country and the networks you connect to.
 
 | مکانیزم امنیتی | یعنی چی؟ |
 |---|---|
-| 🚫 **بدون دستکاری روپ پیش‌فرض** | به‌جای عوض‌کردن گیت‌وی سیستم، فقط دو مسیر `/1` اضافه می‌شه؛ قطع اتصال = برگشت فوری و تمیز |
-| 🧭 **مسیر ضد حلقه** | IP سرورهای VPN به گیت‌وی اصلی قفل می‌شن تا تانل هیچ‌وقت داخل خودش نیافته |
+| 🚫 **بدون دستکاری روت پیش‌فرض** | به‌جای عوض‌کردن گیت‌وی سیستم، فقط دو مسیر `/1` اضافه می‌شه؛ قطع اتصال = برگشت فوری و تمیز |
+| 🧭 **مسیر ضد حلقه** | IP سرورهای VPN به گیت‌وی اصلی قفل می‌شن تا تانل هیچ‌وقت داخل خودش نیفته |
 | 🏠 **شبکه محلی سالم می‌مونه** | ترافیک LAN (پرینتر، NAS، پنل مودم) دست‌نخورده |
 | 📡 **DNS از داخل تانل** | DNS آداپتور مجازی به رله داخلی VPeeN اشاره می‌کنه؛ تنظیمات DNS سیستم تو هیچ‌وقت عوض نمی‌شه |
 | 🛑 **خطای شفاف، نه سکوت** | اگه تانل بیفته، صریح می‌بینی — یا با خاموش‌کردن سوییچ fallback، VPeeN کلاً می‌ایسته تا مخفی‌وار به پروکسی برگرده |
-| 💓 **نگهبان ضربان** | اگه رابط گرافیکی بمیره، هلپر elevated ظرف چند ثانیه همه‌چیز رو برمی‌گردونه |
+| 💓 **نگهبان ضربان** | اگه رابط گرافیکی بمیره، هلپر با دسترسی ادمین ظرف چند ثانیه همه‌چیز رو برمی‌گردونه |
 | 🧹 **ژورنال کرش** | تک‌تک تغییرات مسیرها روی دیسک ثبت می‌شه؛ بعد از کرش سخت، اجرای بعدی خودش پاک می‌کنه |
 | ♻️ **حذف خودکار آداپتور** | آداپتور wintun فقط تا وقتی پروسه‌اش زنده‌ست وجود داره |
 
@@ -542,7 +453,7 @@ Respect the laws of your country and the networks you connect to.
 
 | | حالت پروکسی | 🔒 حالت تانل |
 |---|---|---|
-| پوشش | برنامه‌هایی که پروکسی سیستم رو می‌فهمن | **تمام برنامه‌ها (TCP)** |
+| پوشش | برنامه‌هایی که پروکسی سیستم رو می‌فهمن | **تمام برنامه‌ها — TCP؛ DNS هم از تانل. UDP غیر-DNS (مثل QUIC) رله نمی‌شه و برنامه‌های توانا خودشون به TCP برمی‌گردن** |
 | دسترسی ادمین | لازم نیست | یک بار در هر اتصال |
 | DNS | با DNS خود سیستم | از داخل تانل |
 | مناسب برای | مرورگر، استفاده سریع | محافظت کامل، برنامه‌های سرسخت |
@@ -600,86 +511,26 @@ HTTP   :  http://127.0.0.1:8080
 - 🪟 **نصب‌کنندهٔ واقعی ویندوز** — فایل `VPeeN-Setup-x.y.z.exe` با میان‌بر منوی استارت،
   Uninstaller در Apps & Features و بدون هیچ UAC (نصب per-user مثل VS Code). نسخهٔ پرتابل zip
   هم مثل قبل هست.
-- 🧱 **کیل‌سوئیچ** — اگه تونل وسط کار بشکنه، ترافیک به‌جای لو رفتن **مسدود** می‌شه (فایروال
+- 🧱 **کیل‌سوئیچ** — اگه تانل وسط کار بشکنه، ترافیک به‌جای لو رفتن **مسدود** می‌شه (فایروال
   netsh/iptables) و خودکار تعمیر می‌شه؛ اگه تعمیر نشد، حالت قرمز «کیل‌سوئیچ فعال» می‌مونه.
-  قوانین ژورنال می‌شن و با یک بار اجرای برنامه پاک می‌شن — اینترنتت گیر نمی‌کنه.
+  قوانین در ژورنال ثبت می‌شن و با یک بار اجرای برنامه پاک می‌شن — اینترنتت گیر نمی‌کنه.
 - 🇮🇷 **رابط فارسی راست‌به‌چپ** — تنظیمات → زبان → فارسی؛ کل UI با چیدمان RTL.
 - 🩺 **خودآزمایی محافظت (Doctor)** — دکمهٔ سپر: ۸ بررسی صادقانه روی اتصال زنده (لو رفتن IP،
   DNS، مسیریابی، کیل‌سوئیچ، QUIC/WebRTC) بدون هیچ سایت خارجی.
-- 🔀 **لیست عبور مستقیم (Split Tunneling)** — تو حالت پراکسی، دامنه‌هایی مثل `*.ir` یا سایت بانک
+- 🔀 **لیست عبور مستقیم (Split Tunneling)** — تو حالت پروکسی، دامنه‌هایی مثل `*.ir` یا سایت بانک
   رو مستقیم نگه دار؛ موقع قطع، دقیقاً به حالت قبلی برمی‌گرده.
 - ✅ **۴۳۴ تست در ۱۱ مجموعه** قبل از انتشار سبز شد (۵ مجموعهٔ جدید برای همین قابلیت‌ها).
 
-## 🆕 تازه‌های نسخه ۴.۷ (Nitro)
+## 🆕 تازه‌های نسخه ۴.۸ (Sentinel — نگهبان)
 
-- **کانکت‌های هج‌شده — پایان تأخیر دُم** — اگه هندشیک TLS سرورِ انتخابی ظرف ۳۵۰ میلی‌ثانیه
-  جواب نده، یک اتصال پشتیبان به سرور بعدی **به‌موازات** شروع می‌شه و هرکدوم زودتر جواب داد
-  برنده‌ست. قبلاً یک سرورِ «بهترینِ» خواب‌آلود برای تک‌تک اتصال‌های یک بَرست تا ۸ ثانیه
-  معطلی می‌ساخت؛ حالا فقط ۰.۳۵ ثانیه. بازنده در پس‌زمینه بی‌نشت (بدون لِیک سوکت) جمع می‌شه
-  و جریمه‌ی بریکری هم نمی‌گیره — و چون هج فقط وقتی ظرفیت هندشیک خالی باشه شلیک می‌شه،
-  بارِ مرورگر هیچ‌وقت دو برابر نمی‌شه
-- **کشِ رزولور با singleflight** — هر کانکت تازه قبلاً یک `getaddrinfo`مسدود می‌پرداخت (روی
-  ویندوز رزولور اول LLMNR/mDNS را هم امتحان می‌کند — راحت ۵۰ تا ۲۰۰ میلی‌ثانیه). حالا IP
-  های حل‌شده ۶۰ ثانیه کش می‌شن و بین همه‌ی کانکت‌ها و موج‌های پرکردن استخر مشترکن؛ یک بَرست
-  ۳۰ سوکتی الان **یک** lookup تولید می‌کنه، نه ۳۰ تا. رزولورِ مُرده هم جوابِ کهنه رو سرو
-  می‌کنه به‌جای اینکه با خطا بشینه
-- **Happy-Eyeballs روی رکوردهای DNS** — سروری که با نامِ هاست معرفی شده به رکوردهای A/AAAA
-  واقعی‌ش باز می‌شه و **همه با هم** مسابقه می‌دن؛ رکورد اولِ سیاه‌شده الان ۱۵۰ میلی‌ثانیه
-  هزینه داره نه کل تایم‌اوت. SNI و اعتبارسنجی گواهی هنوز با نام اصلی انجام می‌شه
-- **TTL تطبیقیِ استخر گرم (۸ تا ۲۵ ثانیه)** — سرورهایی که سوکت‌های بیکار رو سریع می‌کُشن
-  دیگه هیت‌های گرم رو به CONNECT شکست‌خورده تبدیل نمی‌کنن: هر ورودیِ کهنه TTL رو کوچیک
-  می‌کنه و بین سیکل‌های probe دوباره رشد می‌کنه
-- **اندازه‌ی تطبیقیِ استخر (۱۲ تا ۲۴)** — هدفِ پرکردن استخر از تقاضای ۱۰ ثانیه‌ی اخیر
-  پیروی می‌کنه؛ بَرستِ بعدِ بَرست، از قبل پرداخت‌شده شروع می‌شه
-- **رتبه‌بندی توان عبوری که کهنه می‌شه** — اندازه‌گیری‌ها فقط ۱۰ دقیقه اعتبار رتبه‌بندی
-  دارن و کاندیدای‌های برتر هر ~۳ دقیقه دوباره سنجیده می‌شن؛ سرورِ «بهترینی» که زیر بار
-  افتاده وسط نشست تنزل می‌گیره
-- و: پنجره‌ی هندشیک ۱۲→۱۶، کش DNS-ریلی ۳۰→۶۰ ثانیه، و نمایش «N rescued» (هج‌های نجات‌دهنده)
-  کنار «N warm» در آمار — جمعاً **۱۳۵ تست سبز**
-(<a href="CHANGELOG-v4.7.0.md">فهرست کامل</a>)
+- **رفع ریشه‌ای باگ‌های حالت تانل** — باگ «متصل ولی بی‌شبکه» در اولین اتصال، روت‌های
+  به‌جا‌مانده بعد از کرش و مسمومیت DNS بعد از hijack؛ همه با مجموعه‌تست اختصاصی قفل شدن.
+- **به‌روزرسانی خودکار با یک کلیک** — برنامه خودش نسخهٔ جدید رو پیدا، دانلود و نصب می‌کنه
+  و ری‌استارت می‌شه.
+- **دروازهٔ تست CI** — از این نسخه به بعد هیچ انتشار بدون سبز شدن کل تست‌ها انجام نمی‌شه.
 
-## 🆕 تازه‌های نسخه ۴.۶ (Turbo)
-
-- **رفع باگ ۱/N در استخر گرم** — نسخه قبل فقط وقتی نوبت round-robin روی سرورِ درست می‌افتاد
-  از اتصال‌های آماده استفاده می‌کرد؛ با ۳ سرور، دوسومِ هر بَرست مرورگر هنوز هندشیک کامل
-  TLS می‌پرداخت! حالا هر اتصال جدیدترین اتصال آماده رو می‌گیره — **راه‌اندازی اتصال ۳.۴ برابر
-  سریع‌تر** (اندازه‌گیری‌شده روی شبکه‌ی واقعی)
-- **استخر بزرگ‌تر و موازی** — ۱۲ اتصال آماده (قبلاً ۴) که با موج‌های موازی پر می‌شن و از
-  لحظه‌ی اتصال شروع به گرم شدن می‌کنن — یعنی **اولین** بارگذاری صفحه هم سریعه، نه فقط دهمین
-- **رتبه‌بندی بر اساس توان عبوری واقعی** — برای اولین بار سیگنالِ سمت سرور: موقع اتصال،
-  ۱۲۸ کیلوبایت واقعی از داخل تانل هر کاندید دانلود و سرعتش اندازه گرفته می‌شه؛ سروری که
-  واقعاً پهنای باند می‌ده برنده‌ست، نه فقط کم‌پینگ‌ترین — و هر ۶۰ ثانیه دوباره سنجیده می‌شه
-- **افزونه کروم «VPeeN Bridge»** — فقط با ۲ دسترسی؛ کل کروم رو با یک کلیک از تانل محلی
-  VPeeN عبور می‌ده (DNS هم سمت خروجی حل می‌شه)
-- **امضای ad-hoc مک + راهنمای Gatekeeper** برای مشکل باز نشدن در Tahoe 26
-- و بافرهای سوکت macOS، همزمانی هندشیک ۸→۱۲، DNS کش ۶۰ ثانیه‌ای، نمایش «N warm» زنده
-  در آمار و ۱۱۸ تست سبز + بنچمارک واقعی
-(<a href="CHANGELOG-v4.6.0.md">فهرست کامل</a>)
-
-## 🆕 تازه‌های نسخه ۴.۵ (Velocity)
-
-- **استخرِ اتصال‌های TLS از پیش گرم** — هر اتصال قبلاً ۳ رفت‌وبرگشت کامل (TCP + TLS + CONNECT)
-  هزینه می‌داد؛ حالا اتصال‌های آماده در پس‌زمینه نگه داشته می‌شن و هر اتصال جدید فقط
-  ۱ رفت‌وبرگشت می‌خره — چیزی ۳ برابر سریع‌تر برای هر کانکت
-- **مسابقه‌ی آدرس‌های سرور (Happy Eyeballs)** — یک آدرس بلاک‌شده دیگه ۸ ثانیه معطلی نمی‌سازه؛
-  همه‌ی آدرس‌ها هم‌زمان مسابقه می‌دن و سالم‌ترین در ~۲۵۰ میلی‌ثانیه برنده می‌شه
-- **رتبه‌بندی سرورها بر اساس تأخیر واقعی** — سریع‌ترین سرور ریجن همیشه اول انتخاب می‌شه؛
-  پینگ هر ریجن هم از بهترین سرورش گزارش می‌شه نه اولین سرورش
-- **اتصال آنی** — رابط بلافاصله بعد از بالا اومدن پراکسی‌ها «متصل» می‌شه؛ تأیید IP خروجی
-  در پس‌زمینه انجام می‌شه
-- **توان عبوری بیشتر** — بافرهای ۲۵۶ کیلوبایتی رله، کش شدن context های TLS،
-  کش DNS برای مسیر SOCKS و تنظیمات TCP بهینه
-(<a href="CHANGELOG-v4.5.0.md">فهرست کامل</a>)
-
-## 🆕 تازه‌های نسخه ۴.۴ (Aurora)
-
-- **رابط گرافیکی جدید «Aurora»** — به‌جای Tk قدیمی، حالا یک وب‌اپ محلی با انیمیشن‌های نرم،
-  گرادیان‌های aurora و اورب پاور متحرک؛ در پنجره بومی (pywebview) یا مرورگر اجرا می‌شه
-- **پینگ واقعی و نرخ ترافیک زنده** در لیست لوکیشن‌ها و کارت‌های آمار
-- **رفع ۱۲ باگ** در بریج و رابط جدید — از جمله کرش اتصال در داده‌ی دمو، نشان‌داده‌نشدن کشورِ
-  خروجی در حالت تانل، ۸ ثانیه معطلی موقع قطع تانل، و ذخیره‌ی بی‌صدای پورت‌های نامعتبر
-  (<a href="CHANGELOG-v4.4.0.md">فهرست کامل</a>)
-- **۲۷ تست انتها-به-انتهای جدید** روی مانده به ۵۹+۱۱ تست قبلی
+> جزئیات کامل نسخه‌های قدیمی‌تر: [۴.۷ Nitro](CHANGELOG-v4.7.0.md) · [۴.۶ Turbo](CHANGELOG-v4.6.0.md) ·
+> [۴.۵ Velocity](CHANGELOG-v4.5.0.md) · [۴.۴ Aurora](CHANGELOG-v4.4.0.md)
 
 ## ❓ سوالات متداول
 
@@ -701,6 +552,13 @@ HTTP   :  http://127.0.0.1:8080
 </details>
 
 <details>
+<summary><b>کیل‌سوئیچ از چی محافظت می‌کنه؟</b></summary>
+لحظه‌ای که تانل می‌میره، فایروال تا زمان تعمیر کل ترافیک غیر-loopback رو می‌بنده — هیچ چیزی
+در فاصلهٔ تعمیر از گیت‌وی واقعی تو بیرون نمی‌ره. اگه تعمیر نشد، مسدود می‌مونه (حالت قرمز) تا خودت تصمیم بگیری.
+پیش‌فرض روشنه و قوانینش ژورنال می‌شن؛ حتی بعد از کرش، یک بار اجرای برنامه همه‌چیز رو پاک می‌کنه.
+</details>
+
+<details>
 <summary><b>اطلاعاتم کجا ذخیره می‌شه؟</b></summary>
 فقط در <code>~/.vpeen/</code> روی سیستم خودت: توکن کش‌شده، سرورها و تنظیمات.
 </details>
@@ -719,5 +577,5 @@ HTTP   :  http://127.0.0.1:8080
 <br/>
 <b>⭐ If VPeeN saved you some money, a star is the best thank-you.</b><br/>
 <a href="../../stargazers"><img src="https://img.shields.io/badge/%E2%AD%90-Star%20on%20GitHub-ffcb2f?style=for-the-badge&labelColor=0e1526"/></a>
-<br/><sub>v4.5.0 “Velocity” · pure-Python core · zero-dependency GUI</sub>
+<br/><sub>v4.9.0 “Sangar” · pure-Python core · zero-dependency GUI</sub>
 </div>
